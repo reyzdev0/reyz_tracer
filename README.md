@@ -32,11 +32,14 @@
    ```bash
    git clone [https://github.com/reyzdev0/reyz_tracer.git](https://github.com/reyzdev0/reyz_tracer.git)
 2. **Masuk ke Direktori Proyek:**
-   ```cd reyz_tracer
+   ```bash
+   cd reyz_tracer
 3. **Install Dependensi:**
-   ```flutter pub get
+   ```bash
+   flutter pub get
 4. **jalankan aplikasi**
-   ```flutter run
+   ```bash
+   flutter run
 📝 Lisensi & Disklaimer
 Aplikasi ini dikembangkan secara independen untuk tujuan edukasi dan simulasi pembelajaran jaringan. Aplikasi ini bukan produk resmi dari Cisco Systems, Inc.
  Developed with ❤️ by reyzdev0

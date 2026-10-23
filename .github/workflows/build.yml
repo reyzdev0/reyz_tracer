@@ -38,14 +38,12 @@ jobs:
           mkdir -p ~/.android
           cp keystore/debug.keystore ~/.android/debug.keystore
 
-      # Download semua plugin terlebih dahulu
       - run: flutter pub get
 
-      # Paksa semua file Gradle di app maupun di plugin cache untuk memakai SDK 36
       - name: Paksa SDK 36 Global
         run: |
-          find android -type f -name "build.gradle*" -exec sed -i -e 's/compileSdk = flutter.compileSdkVersion/compileSdk = 36/g' -e 's/compileSdk = [0-9]*/compileSdk = 36/g' -e 's/compileSdkVersion [0-9]*/compileSdkVersion 36/g' {} +
-          find ~/.pub-cache -type f -name "build.gradle*" -exec sed -i -e 's/compileSdk = [0-9]*/compileSdk = 36/g' -e 's/compileSdkVersion [0-9]*/compileSdkVersion 36/g' {} +
+          # Ganti seluruh baris yang berisi compileSdk / compileSdkVersion secara bersih
+          find android ~/.pub-cache -type f \( -name "build.gradle" -o -name "build.gradle.kts" \) -exec sed -i -E 's/.*compileSdk(Version)?.*/compileSdk = 36/g' {} +
 
       - run: flutter build apk --release --dart-define=BUILD=${{ github.run_number }}
 

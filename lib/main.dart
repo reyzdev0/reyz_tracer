@@ -18,6 +18,7 @@ Color get kAcc => const [Color(0xFF00A8FF), Color(0xFFFFFFFF), Color(0xFF000000)
 Color get kFg => themeIdx.value == 2 ? Colors.black87 : Colors.white; // warna icon/teks utama
 Color get kFg2 => themeIdx.value == 2 ? Colors.black54 : Colors.white54;
 
+const _o = Offset(36, 30);
 
 enum T { router, sw, hub, ap, wlc, pc, laptop, server, phone, printer, ipPhone, swSensor, motion, lamp, alarm, iotGw }
 enum Tool { select, hand, delete, inspect, note, ping, cable }

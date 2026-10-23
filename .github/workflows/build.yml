@@ -28,10 +28,13 @@ jobs:
       - name: Buat folder android
         run: |
           flutter create --platforms=android --project-name reyz_tracer --org com.reyz _tmp
+          rm -rf android
           cp -r _tmp/android android
           rm -rf _tmp
           sed -i 's/android:label="[^"]*"/android:label="Reyz Tracer Simulation"/' android/app/src/main/AndroidManifest.xml
           sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <application#' android/app/src/main/AndroidManifest.xml
+          sed -i 's/compileSdk = .*/compileSdk = 36/' android/app/build.gradle
+          sed -i 's/compileSdk .*/compileSdk 36/' android/app/build.gradle
 
       # Keystore tetap: tanpa ini tiap build punya tanda tangan beda, jadi harus uninstall dulu
       - name: Pakai keystore tetap

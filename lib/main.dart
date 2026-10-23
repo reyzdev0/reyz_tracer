@@ -16,8 +16,8 @@ Color get kBg => const [Color(0xFF0A1931), Color(0xFF000000), Color(0xFFF2F4F7)]
 Color get kCard => const [Color(0xFF12284A), Color(0xFF151515), Color(0xFFFFFFFF)][themeIdx.value];
 Color get kAcc => const [Color(0xFF00A8FF), Color(0xFFFFFFFF), Color(0xFF000000)][themeIdx.value];
 Color get kFg => themeIdx.value == 2 ? Colors.black87 : Colors.white; // warna icon/teks utama
-Color get kFg2 => themeIdx.value == 2 ? Colors.black54 : kFg2;
-const _o = Offset(36, 30); // titik tengah icon device terhadap posisinya
+Color get kFg2 => themeIdx.value == 2 ? Colors.black54 : Colors.white54;
+
 
 enum T { router, sw, hub, ap, wlc, pc, laptop, server, phone, printer, ipPhone, swSensor, motion, lamp, alarm, iotGw }
 enum Tool { select, hand, delete, inspect, note, ping, cable }

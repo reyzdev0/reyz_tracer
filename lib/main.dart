@@ -1,10 +1,14 @@
 // ignore_for_file: curly_braces_in_flow_control_structures
 // Reyz Tracer Simulation - simulasi jaringan ala Packet Tracer (versi HP)
 import 'dart:convert';
+import 'dart:io' show HttpClient;
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
+
+const kBuild = int.fromEnvironment('BUILD', defaultValue: 0); // nomor build (diisi otomatis oleh GitHub Actions)
 
 // Tema: 0 = Biru Dongker (default), 1 = Hitam, 2 = Putih
 final themeIdx = ValueNotifier<int>(0), showGrid = ValueNotifier<bool>(true);
@@ -118,10 +122,17 @@ class PR { bool ok; String msg; List<int> path; PR(this.ok, this.msg, this.path)
 /// Titik awal aplikasi: kunci layar ke mode landscape (miring).
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Kalau ada widget yang error, tampilkan teks error-nya (bukan layar abu-abu kosong) supaya gampang dilacak
+  ErrorWidget.builder = (d) => Directionality(
+      textDirection: TextDirection.ltr,
+      child: Material(color: Colors.black, child: SingleChildScrollView(padding: const EdgeInsets.all(16),
+          child: Text('Terjadi error:\n${d.exception}\n\n${d.stack}', style: const TextStyle(color: Colors.redAccent, fontSize: 11)))));
   SystemChrome.setPreferredOrientations([DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
-  final sp = await SharedPreferences.getInstance(); // muat pengaturan tema & grid
-  themeIdx.value = sp.getInt('theme') ?? 0;
-  showGrid.value = sp.getBool('grid') ?? true;
+  try { // muat pengaturan tema & grid (tidak boleh bikin aplikasi macet)
+    final sp = await SharedPreferences.getInstance().timeout(const Duration(seconds: 3));
+    themeIdx.value = (sp.getInt('theme') ?? 0).clamp(0, 2);
+    showGrid.value = sp.getBool('grid') ?? true;
+  } catch (_) {}
   runApp(const ReyzApp());
 }
 
@@ -366,6 +377,35 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
   /// Refresh umum: DHCP + trigger IoT + tampilan.
   void touch() => setState(() { autoDhcp(); propagate(); });
 
+  /// Cek update di GitHub Releases. Kalau ada versi baru, buka link download APK (install menimpa versi lama, data tetap).
+  Future<void> checkUpdate() async {
+    final sp = await SharedPreferences.getInstance();
+    final repo = await ask('Repo GitHub (user/repo)', sp.getString('repo') ?? '');
+    if (repo == null || !repo.contains('/')) return;
+    await sp.setString('repo', repo);
+    toast(true, 'Mengecek update...');
+    try {
+      final rq = await HttpClient().getUrl(Uri.parse('https://api.github.com/repos/$repo/releases/latest'));
+      rq.headers.set('User-Agent', 'ReyzTracer');
+      final rs = await rq.close();
+      final j = jsonDecode(await rs.transform(utf8.decoder).join());
+      if (j['tag_name'] == null) { toast(false, 'Belum ada release di repo itu (cek nama repo / jalankan build dulu)'); return; }
+      final n = int.tryParse('${j['tag_name']}'.replaceAll(RegExp(r'\D'), '')) ?? 0;
+      final apk = (j['assets'] as List).map((a) => '${a['browser_download_url']}').firstWhere((u) => u.endsWith('.apk'), orElse: () => '');
+      if (!mounted) return;
+      if (n <= kBuild || apk.isEmpty) { toast(true, 'Sudah versi terbaru (build $kBuild)'); return; }
+      showDialog(context: context, builder: (_) => AlertDialog(
+          backgroundColor: kCard, title: const Text('Update tersedia'),
+          content: Text('Build $n sudah tersedia (kamu: build $kBuild). Tekan Update, download APK-nya, lalu buka file-nya untuk memperbarui. Data projek tetap aman.'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Nanti')),
+            FilledButton(onPressed: () { Navigator.pop(context); launchUrl(Uri.parse(apk), mode: LaunchMode.externalApplication); }, child: const Text('Update')),
+          ]));
+    } catch (e) {
+      if (mounted) toast(false, 'Gagal cek update: cek internet / nama repo');
+    }
+  }
+
   /// Ganti tema lalu simpan pilihan.
   Future<void> setTheme(int i) async {
     themeIdx.value = i;
@@ -387,6 +427,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
               showGrid.value = v; setState(() {}); ss(() {});
               (await SharedPreferences.getInstance()).setBool('grid', v);
             }),
+            ListTile(dense: true, leading: const Icon(Icons.system_update), title: const Text('Cek Update aplikasi'), subtitle: Text('Versi build: $kBuild'), onTap: () { Navigator.pop(ctx); checkUpdate(); }),
             ListTile(dense: true, leading: const Icon(Icons.layers_clear), title: const Text('Kosongkan canvas'), onTap: () { Navigator.pop(ctx); fromJ({'devs': [], 'links': [], 'notes': []}); }),
           ])));
 

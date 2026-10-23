@@ -1,3 +1,6 @@
+// Copyright (c) 2026 reyzdev0. All rights reserved.
+// Licensed under the GNU General Public License v3.0.
+
 # Reyz Tracer Simulation 🌐📱
 
 **Reyz Tracer Simulation** adalah aplikasi simulator dan visualisasi jaringan interaktif berbasis Android yang dibangun menggunakan **Flutter**. Aplikasi ini dirancang untuk membantu pelajar, mahasiswa, dan penggiat jaringan dalam mempelajari konsep dasar jaringan, konfigurasi perangkat, simulasi paket data, serta integrasi perangkat IoT secara visual dan praktis di perangkat seluler.

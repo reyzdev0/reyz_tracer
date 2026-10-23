@@ -1,7 +1,7 @@
 name: reyz_tracer
 description: Reyz Tracer Simulation - simulasi jaringan ala Packet Tracer
 publish_to: none
-version: 1.0.0+1
+version: 1.2.0+1
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -11,6 +11,7 @@ dependencies:
     sdk: flutter
   shared_preferences: ^2.2.0
   url_launcher: ^6.3.0
+  file_picker: ^8.1.2
 
 flutter:
   uses-material-design: true

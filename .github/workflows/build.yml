@@ -33,8 +33,15 @@ jobs:
           rm -rf _tmp
           sed -i 's/android:label="[^"]*"/android:label="Reyz Tracer Simulation"/' android/app/src/main/AndroidManifest.xml
           sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <application#' android/app/src/main/AndroidManifest.xml
-          sed -i 's/compileSdk = .*/compileSdk = 36/' android/app/build.gradle
-          sed -i 's/compileSdk .*/compileSdk 36/' android/app/build.gradle
+          
+          # Cek dan ubah compileSdk ke 36 untuk file .gradle maupun .kts
+          if [ -f android/app/build.gradle ]; then
+            sed -i 's/compileSdk = .*/compileSdk = 36/' android/app/build.gradle
+            sed -i 's/compileSdk .*/compileSdk 36/' android/app/build.gradle
+          elif [ -f android/app/build.gradle.kts ]; then
+            sed -i 's/compileSdk = .*/compileSdk = 36/' android/app/build.gradle.kts
+            sed -i 's/compileSdk .*/compileSdk = 36/' android/app/build.gradle.kts
+          fi
 
       # Keystore tetap: tanpa ini tiap build punya tanda tangan beda, jadi harus uninstall dulu
       - name: Pakai keystore tetap

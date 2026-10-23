@@ -2,12 +2,16 @@
 // Reyz Tracer Simulation - simulasi jaringan ala Packet Tracer (versi HP)
 import 'dart:convert';
 import 'dart:io' show HttpClient;
+import 'dart:math' as math;
+import 'dart:typed_data';
 import 'dart:ui' as ui;
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+const kVersion = '1.2.0';
 const kBuild = int.fromEnvironment('BUILD', defaultValue: 0); // nomor build (diisi otomatis oleh GitHub Actions)
 
 // Tema: 0 = Biru Dongker (default), 1 = Hitam, 2 = Putih
@@ -16,9 +20,8 @@ Color get kBg => const [Color(0xFF0A1931), Color(0xFF000000), Color(0xFFF2F4F7)]
 Color get kCard => const [Color(0xFF12284A), Color(0xFF151515), Color(0xFFFFFFFF)][themeIdx.value];
 Color get kAcc => const [Color(0xFF00A8FF), Color(0xFFFFFFFF), Color(0xFF000000)][themeIdx.value];
 Color get kFg => themeIdx.value == 2 ? Colors.black87 : Colors.white; // warna icon/teks utama
-Color get kFg2 => themeIdx.value == 2 ? Colors.black54 : Colors.white54;
-
-const _o = Offset(36, 30);
+Color get kFg2 => themeIdx.value == 2 ? Colors.black54 : Colors.white70;
+const _o = Offset(36, 30); // titik tengah icon device terhadap posisinya
 
 enum T { router, sw, hub, ap, wlc, pc, laptop, server, phone, printer, ipPhone, swSensor, motion, lamp, alarm, iotGw }
 enum Tool { select, hand, delete, inspect, note, ping, cable }
@@ -101,17 +104,19 @@ class Dev {
   int id; T t; String name; Offset pos;
   String ip = '', mask = '255.255.255.0', gw = '';
   final Map<String, Iface> ifs = {};
+  final List<List<String>> routes = []; // rute statis router: [network, mask, next-hop]
   final List<String> log = [];
   bool on = false; // status IoT: sensor aktif / aktuator menyala
   bool dhcp = false, useDhcp = false; // dhcp = layanan DHCP di Server, useDhcp = client minta IP otomatis
   String pool = '192.168.1.100', dgw = ''; int poolSize = 50; // pengaturan pool DHCP
   int mode = 0; String cur = ''; // mode CLI router: 0 user, 1 priv, 2 config, 3 config-if
   Dev(this.id, this.t, this.name, this.pos) { if (t == T.router) { ifs['g0/0'] = Iface(); ifs['g0/1'] = Iface(); } }
-  Map toJ() => {'id': id, 't': t.index, 'n': name, 'x': pos.dx, 'y': pos.dy, 'ip': ip, 'mk': mask, 'gw': gw, 'on': on, 'dh': dhcp, 'ud': useDhcp, 'pl': pool, 'ps': poolSize, 'dg': dgw,
+  Map toJ() => {'id': id, 't': t.index, 'n': name, 'x': pos.dx, 'y': pos.dy, 'ip': ip, 'mk': mask, 'gw': gw, 'on': on, 'dh': dhcp, 'ud': useDhcp, 'pl': pool, 'ps': poolSize, 'dg': dgw, 'rt': routes,
         'ifs': ifs.map((k, v) => MapEntry(k, [v.ip, v.mask, v.up]))};
   static Dev fromJ(Map j) {
     final d = Dev(j['id'], T.values[j['t']], j['n'], Offset(j['x'], j['y']))..ip = j['ip']..mask = j['mk']..gw = j['gw']..on = j['on'] ?? false..dhcp = j['dh'] ?? false..useDhcp = j['ud'] ?? false..pool = j['pl'] ?? '192.168.1.100'..poolSize = j['ps'] ?? 50..dgw = j['dg'] ?? '';
     (j['ifs'] as Map).forEach((k, v) => d.ifs[k] = Iface()..ip = v[0]..mask = v[1]..up = v[2]);
+    for (final e in (j['rt'] ?? []) as List) d.routes.add(List<String>.from(e));
     return d;
   }
 }
@@ -196,6 +201,27 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
     return null;
   }
 
+  /// Cari jalur dari router r sampai ke device target (IP dst), lewat rute connected atau ip route (maks 8 router).
+  List<int>? routeVia(Dev r, String dst, Dev target) {
+    var cur = r;
+    final path = <int>[r.id];
+    for (var hop = 0; hop < 8; hop++) {
+      if (cur.ifs.values.any((i) => i.up && same(i.ip, dst, i.mask))) {
+        final p = l2(cur.id, target.id);
+        return p == null ? null : [...path, ...p.skip(1)];
+      }
+      final rt = cur.routes.where((x) => same(dst, x[0], x[1])).firstOrNull;
+      if (rt == null) return null;
+      final nh = devs.where((e) => e.t == T.router && e != cur && e.ifs.values.any((i) => i.up && i.ip == rt[2])).firstOrNull;
+      if (nh == null || !cur.ifs.values.any((i) => i.up && same(i.ip, rt[2], i.mask))) return null;
+      final p = l2(cur.id, nh.id);
+      if (p == null) return null;
+      path.addAll(p.skip(1));
+      cur = nh;
+    }
+    return null;
+  }
+
   /// INTI SIMULASI: logika ping palsu tapi logis (satu jaringan = sukses, beda = lewat gateway/router).
   PR ping(Dev s, String sip, String smk, String sgw, String dst) {
     if (sip.isEmpty) return PR(false, 'Gagal! ${s.name} belum punya IP Address', []);
@@ -214,10 +240,12 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
     if (r == null) return PR(false, 'Gagal! Gateway $sgw tidak ditemukan / interface router belum no shutdown', []);
     final p1 = l2(s.id, r.id);
     if (p1 == null) return PR(false, 'Gagal! ${s.name} belum tersambung ke router gateway', []);
-    if (!r.ifs.values.any((i) => i.up && same(i.ip, dst, i.mask))) return PR(false, 'Gagal! Router tidak punya rute ke jaringan $dst, cek IP interface router', []);
-    final p2 = l2(r.id, d.id);
-    if (p2 == null) return PR(false, 'Gagal! Router belum tersambung ke ${d.name}', []);
+    final p2 = routeVia(r, dst, d);
+    if (p2 == null) return PR(false, 'Gagal! ${r.name} tidak punya rute ke $dst (cek ip address, no shutdown, kabel, dan ip route)', []);
     if (d.t != T.router && d.gw.isEmpty) return PR(false, 'Gagal! Gateway ${d.name} kosong, balasan tidak bisa kembali', []);
+    // balasan harus bisa kembali: router terakhir di sisi tujuan harus punya rute ke pengirim
+    final last = p2.map(byId).lastWhere((x) => x.t == T.router, orElse: () => r);
+    if (routeVia(last, sip, s) == null) return PR(false, 'Gagal! Paket sampai, tapi balasan tidak bisa kembali: ${last.name} tidak punya rute ke $sip (tambah ip route)', []);
     return PR(true, 'Berhasil! Ping dari ${s.name} ke ${d.name} Reply (via ${r.name})', [...p1, ...p2.skip(1)]);
   }
 
@@ -253,7 +281,8 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
       final i = e.value;
       return 'C    ${ips(ipn(i.ip)! & ipn(i.mask)!)}/${pre(i.mask)} is directly connected, ${e.key}';
     }).toList();
-    return r.isEmpty ? '(Belum ada rute. Atur ip address lalu no shutdown)' : 'Codes: C - connected\n\n${r.join('\n')}';
+    r.addAll(d.routes.map((x) => 'S    ${x[0]}/${pre(x[1])} [1/0] via ${x[2]}'));
+    return r.isEmpty ? '(Belum ada rute. Atur ip address lalu no shutdown)' : 'Codes: C - connected, S - static\n\n${r.join('\n')}';
   }
 
   /// Menjalankan perintah CLI (PC = Command Prompt, Router = CLI palsu).
@@ -306,6 +335,11 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
         }
       case 'ip':
         {
+          if (m >= 2 && w.length >= 5 && w[1] == 'route') { // ip route <network> <mask> <next-hop>
+            if (ipn(w[2]) == null || ipn(w[3]) == null || ipn(w[4]) == null) return '% Format salah. Contoh: ip route 192.168.2.0 255.255.255.0 10.0.0.2';
+            d.routes..removeWhere((x) => x[0] == w[2] && x[1] == w[3])..add([w[2], w[3], w[4]]);
+            return '';
+          }
           if (m != 3 || w.length < 4 || w[1] != 'address') return bad;
           if (ipn(w[2]) == null || ipn(w[3]) == null) return '% Format IP atau subnet mask salah';
           d.ifs[d.cur]!..ip = w[2]..mask = w[3];
@@ -407,6 +441,171 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
     }
   }
 
+  /// Geser tampilan canvas supaya semua device kelihatan.
+  void focusAll() {
+    if (devs.isEmpty) return;
+    final x = devs.map((d) => d.pos.dx).reduce(math.min), y = devs.map((d) => d.pos.dy).reduce(math.min);
+    ctrl.value = Matrix4.translationValues(-(x - 60), -(y - 80), 0);
+  }
+
+  /// Konfirmasi dulu kalau canvas berisi, sebelum diganti template / file import.
+  Future<void> confirmLoad(VoidCallback f) async {
+    if (devs.isNotEmpty) {
+      final ok = await showDialog<bool>(context: context, builder: (_) => AlertDialog(
+          backgroundColor: kCard, title: const Text('Ganti canvas?'),
+          content: const Text('Topologi sekarang akan diganti. Simpan dulu lewat Save / Export kalau masih dibutuhkan.'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Batal')),
+            FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Lanjut')),
+          ]));
+      if (ok != true) return;
+    }
+    f();
+  }
+
+  /// EXPORT .rts: seluruh topologi (device, posisi, kabel, IP, nama, catatan) jadi JSON lalu disimpan sebagai file .rts.
+  Future<void> exportRts() async {
+    final name = await ask('Nama file (.rts)', 'projek');
+    if (name == null || name.isEmpty) return;
+    final data = jsonEncode({'app': 'ReyzTracer', 'fmt': 1, 'ver': kVersion, 'saved': DateTime.now().toIso8601String(), ...toJ()});
+    try {
+      final p = await FilePicker.platform.saveFile(
+          dialogTitle: 'Simpan projek', fileName: '${name.replaceAll(RegExp(r'[^\w\- ]'), '')}.rts', bytes: Uint8List.fromList(utf8.encode(data)));
+      if (p != null && mounted) toast(true, 'Projek berhasil di-export');
+    } catch (e) {
+      if (mounted) toast(false, 'Gagal export: $e');
+    }
+  }
+
+  /// IMPORT .rts: baca file, validasi, lalu render ulang topologi ke canvas.
+  Future<void> importRts() async {
+    try {
+      final r = await FilePicker.platform.pickFiles(type: FileType.any, withData: true);
+      final f = r?.files.single;
+      if (f == null || f.bytes == null) return;
+      final j = jsonDecode(utf8.decode(f.bytes!));
+      if (j is! Map || j['devs'] is! List || j['links'] is! List) throw 'bukan file .rts';
+      fromJ(j);
+      if (mounted) toast(true, 'Projek "${f.name}" dimuat');
+    } catch (e) {
+      if (mounted) toast(false, 'Gagal import: file tidak valid');
+    }
+  }
+
+  /// EXPORT PNG: gambar ulang topologi (hanya area yang berisi device) ke gambar, lalu simpan.
+  Future<void> exportPng() async {
+    if (devs.isEmpty && notes.isEmpty) { toast(false, 'Canvas masih kosong'); return; }
+    try {
+      final rects = [for (final d in devs) d.pos & const Size(72, 86), for (final n in notes) n.pos & const Size(216, 70)];
+      var b = rects.first;
+      for (final x in rects.skip(1)) b = b.expandToInclude(x);
+      b = b.inflate(50);
+      final pr = math.min(2.0, 4096 / math.max(b.width, b.height));
+      final rec = ui.PictureRecorder(), cv = Canvas(rec);
+      cv.scale(pr);
+      cv.translate(-b.left, -b.top);
+      cv.drawRect(b, Paint()..color = kBg);
+      Pt(devs, links, null, 0).paint(cv, const Size(6000, 6000)); // grid + kabel
+      for (final d in devs) {
+        final c = d.pos + _o, box = ui.RRect.fromRectAndRadius(Rect.fromCenter(center: c, width: 60, height: 60), const Radius.circular(16));
+        final col = lit(d) ? stateColor(d) : kAcc, ic = icn(d);
+        if (lit(d)) cv.drawRRect(box, Paint()..color = col.withAlpha(150)..maskFilter = const MaskFilter.blur(BlurStyle.normal, 12));
+        cv.drawRRect(box, Paint()..color = kCard);
+        cv.drawRRect(box, Paint()..style = PaintingStyle.stroke..strokeWidth = 1.5..color = col);
+        final icol = iot(d.t) ? (d.t == T.iotGw ? kAcc : (d.on ? stateColor(d) : Colors.grey)) : (netDev(d.t) ? kAcc : kFg);
+        txt(cv, String.fromCharCode(ic.codePoint), c, TextStyle(fontFamily: ic.fontFamily, package: ic.fontPackage, fontSize: 32, color: icol));
+        txt(cv, d.name, d.pos + const Offset(36, 70), TextStyle(fontSize: 11, color: kFg));
+        if (iot(d.t) && d.t != T.iotGw) txt(cv, d.on ? 'ON' : 'OFF', d.pos + const Offset(36, 83), TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: d.on ? stateColor(d) : Colors.grey));
+      }
+      for (final n in notes) {
+        final tp = TextPainter(text: TextSpan(text: n.text, style: const TextStyle(fontSize: 12, color: Colors.white)), textDirection: TextDirection.ltr)..layout(maxWidth: 184);
+        final box = ui.RRect.fromRectAndRadius(Rect.fromLTWH(n.pos.dx, n.pos.dy, tp.width + 16, tp.height + 16), const Radius.circular(8));
+        cv.drawRRect(box, Paint()..color = const Color(0xFF3A3410));
+        cv.drawRRect(box, Paint()..style = PaintingStyle.stroke..color = Colors.amber);
+        tp.paint(cv, n.pos + const Offset(8, 8));
+      }
+      final img = await rec.endRecording().toImage((b.width * pr).round(), (b.height * pr).round());
+      final bd = await img.toByteData(format: ui.ImageByteFormat.png);
+      final p = await FilePicker.platform.saveFile(dialogTitle: 'Simpan gambar topologi', fileName: 'topologi_${DateTime.now().millisecondsSinceEpoch}.png', bytes: bd!.buffer.asUint8List());
+      if (p != null && mounted) toast(true, 'Gambar topologi tersimpan');
+    } catch (e) {
+      if (mounted) toast(false, 'Gagal export gambar: $e');
+    }
+  }
+
+  /// Menu Berkas: export / import .rts dan export gambar.
+  void files() => showModalBottomSheet(
+      context: context, backgroundColor: kCard,
+      builder: (ctx) => ListView(shrinkWrap: true, children: [
+            ListTile(dense: true, title: Text('Berkas Projek', style: TextStyle(color: kAcc))),
+            ListTile(dense: true, leading: const Icon(Icons.upload_file), title: const Text('Export projek (.rts)'), subtitle: const Text('Simpan topologi ke file'), onTap: () { Navigator.pop(ctx); exportRts(); }),
+            ListTile(dense: true, leading: const Icon(Icons.file_open), title: const Text('Import projek (.rts)'), subtitle: const Text('Muat topologi dari file'), onTap: () { Navigator.pop(ctx); confirmLoad(importRts); }),
+            ListTile(dense: true, leading: const Icon(Icons.image), title: const Text('Export canvas ke gambar (PNG)'), subtitle: const Text('Pilih folder, misalnya Pictures'), onTap: () { Navigator.pop(ctx); exportPng(); }),
+          ]));
+
+  /// Template Basic LAN: 1 Switch, 2 PC, 1 Printer (192.168.1.0/24).
+  void tplLan() {
+    fromJ({'devs': [], 'links': [], 'notes': []});
+    final sw = add(T.sw, const Offset(420, 260));
+    final a = add(T.pc, const Offset(160, 120), ip: '192.168.1.10'), b = add(T.pc, const Offset(160, 400), ip: '192.168.1.11');
+    final p = add(T.printer, const Offset(680, 260), ip: '192.168.1.20');
+    setState(() {
+      for (final x in [a, b, p]) links.add(Link(x.id, sw.id, 0));
+      notes.add(Note(const Offset(160, 40), 'Basic LAN 192.168.1.0/24. Coba: PC1 > Command Prompt > ping 192.168.1.11'));
+    });
+    focusAll();
+  }
+
+  /// Template Router to Router: 2 router (kabel crossover), 2 subnet PC, ip route sudah terpasang.
+  void tplRouter() {
+    fromJ({'devs': [], 'links': [], 'notes': []});
+    final a = add(T.pc, const Offset(80, 260), ip: '192.168.1.2', gw: '192.168.1.1');
+    final s1 = add(T.sw, const Offset(280, 260)), r1 = add(T.router, const Offset(500, 260));
+    final r2 = add(T.router, const Offset(760, 260)), s2 = add(T.sw, const Offset(980, 260));
+    final b = add(T.pc, const Offset(1180, 260), ip: '192.168.2.2', gw: '192.168.2.1');
+    void ifc(Dev r, String k, String ip, String mk) => r.ifs[k]!..ip = ip..mask = mk..up = true;
+    ifc(r1, 'g0/0', '192.168.1.1', '255.255.255.0');
+    ifc(r1, 'g0/1', '10.0.0.1', '255.255.255.252');
+    ifc(r2, 'g0/0', '10.0.0.2', '255.255.255.252');
+    ifc(r2, 'g0/1', '192.168.2.1', '255.255.255.0');
+    r1.routes.add(['192.168.2.0', '255.255.255.0', '10.0.0.2']);
+    r2.routes.add(['192.168.1.0', '255.255.255.0', '10.0.0.1']);
+    setState(() {
+      links..add(Link(a.id, s1.id, 0))..add(Link(s1.id, r1.id, 0))..add(Link(r1.id, r2.id, 1))..add(Link(r2.id, s2.id, 0))..add(Link(s2.id, b.id, 0));
+      notes.add(Note(const Offset(300, 140), 'Subnet 1: 192.168.1.0/24, Subnet 2: 192.168.2.0/24, link router 10.0.0.0/30. Coba: PC1 ping 192.168.2.2. Lihat rute: Router > CLI > enable, show ip route'));
+    });
+    focusAll();
+  }
+
+  /// Template Smart Home IoT: 1 IoT Gateway, 1 Sensor Gerak, 1 Lampu, 1 Alarm.
+  void tplIot() {
+    fromJ({'devs': [], 'links': [], 'notes': []});
+    final mo = add(T.motion, const Offset(150, 260)), gw = add(T.iotGw, const Offset(450, 260));
+    final la = add(T.lamp, const Offset(750, 140)), al = add(T.alarm, const Offset(750, 380));
+    setState(() {
+      links..add(Link(mo.id, gw.id, 4))..add(Link(gw.id, la.id, 4))..add(Link(gw.id, al.id, 4));
+      notes.add(Note(const Offset(150, 100), 'Smart Home: tap Sensor Gerak untuk ON/OFF, Lampu & Alarm ikut berubah.'));
+    });
+    focusAll();
+  }
+
+  /// Menu Lab Templates (template baru + lab latihan).
+  void templates() => showModalBottomSheet(
+      context: context, backgroundColor: kCard,
+      builder: (ctx) => ListView(shrinkWrap: true, children: [
+            ListTile(dense: true, title: Text('Lab Templates', style: TextStyle(color: kAcc))),
+            for (final t in [
+              ('Basic LAN', '1 Switch, 2 PC, 1 Printer', Icons.lan, tplLan),
+              ('Router to Router', '2 Router, 2 subnet PC, ip route', Icons.router, tplRouter),
+              ('Smart Home IoT', 'Gateway, Sensor Gerak, Lampu, Alarm', Icons.home, tplIot),
+              ('Lab 2 PC 1 Switch', 'Latihan ping dasar', Icons.science, lab1),
+              ('Lab 2 Jaringan 1 Router', 'Latihan CLI router', Icons.science, lab2),
+              ('Lab IoT Saklar & Lampu', 'Saklar dan Sensor Gerak', Icons.lightbulb, lab3),
+              ('Lab DHCP Server & 2 PC', 'Latihan DHCP', Icons.settings_ethernet, lab4),
+            ])
+              ListTile(dense: true, leading: Icon(t.$3), title: Text(t.$1), subtitle: Text(t.$2), onTap: () { Navigator.pop(ctx); confirmLoad(t.$4); }),
+          ]));
+
   /// Ganti tema lalu simpan pilihan.
   Future<void> setTheme(int i) async {
     themeIdx.value = i;
@@ -428,7 +627,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
               showGrid.value = v; setState(() {}); ss(() {});
               (await SharedPreferences.getInstance()).setBool('grid', v);
             }),
-            ListTile(dense: true, leading: const Icon(Icons.system_update), title: const Text('Cek Update aplikasi'), subtitle: Text('Versi build: $kBuild'), onTap: () { Navigator.pop(ctx); checkUpdate(); }),
+            ListTile(dense: true, leading: const Icon(Icons.system_update), title: const Text('Cek Update aplikasi'), subtitle: Text('Versi $kVersion (build $kBuild)'), onTap: () { Navigator.pop(ctx); checkUpdate(); }),
             ListTile(dense: true, leading: const Icon(Icons.layers_clear), title: const Text('Kosongkan canvas'), onTap: () { Navigator.pop(ctx); fromJ({'devs': [], 'links': [], 'notes': []}); }),
           ])));
 
@@ -551,9 +750,9 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
   void fromJ(Map j) => setState(() {
         devs..clear()..addAll((j['devs'] as List).map((e) => Dev.fromJ(e)));
         links..clear()..addAll((j['links'] as List).map((e) => Link(e[0], e[1], e[2])));
-        notes..clear()..addAll((j['notes'] as List).map((e) => Note(Offset(e[0], e[1]), e[2])));
+        notes..clear()..addAll(((j['notes'] ?? []) as List).map((e) => Note(Offset(e[0], e[1]), e[2])));
         nid = devs.fold(0, (m, d) => d.id > m ? d.id : m) + 1;
-        first = null; run = null; propagate(); autoDhcp();
+        first = null; run = null; propagate(); autoDhcp(); focusAll();
       });
 
   /// Simpan topologi ke memori HP.
@@ -688,6 +887,8 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
           nav(Icons.delete, 'Hapus', () => setState(() { tool = Tool.delete; first = null; }), on: tool == Tool.delete),
           nav(Icons.play_arrow, 'Play', play),
           nav(Icons.save, 'Save', save),
+          nav(Icons.folder_copy, 'Berkas', files),
+          nav(Icons.dashboard_customize, 'Template', templates),
         ])),
         Expanded(child: Stack(children: [
           InteractiveViewer(
@@ -716,6 +917,12 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
       ])),
     );
   }
+}
+
+/// Gambar teks di tengah titik c (dipakai saat export gambar).
+void txt(Canvas cv, String s, Offset c, TextStyle st) {
+  final tp = TextPainter(text: TextSpan(text: s, style: st), textDirection: TextDirection.ltr)..layout();
+  tp.paint(cv, c - Offset(tp.width / 2, tp.height / 2));
 }
 
 /// Garis putus-putus.
@@ -803,7 +1010,7 @@ class _DevDlgState extends State<DevDialog> {
   @override
   void initState() {
     super.initState();
-    if (d.log.isEmpty) d.log.add(d.t == T.router ? 'Reyz Router CLI\nKetik: enable, conf t, interface g0/0, ip address <ip> <mask>, no shutdown, do show ip route\n' : 'Reyz Command Prompt\nKetik: ping <ip>, ipconfig, ipconfig /renew, cls\n');
+    if (d.log.isEmpty) d.log.add(d.t == T.router ? 'Reyz Router CLI\nKetik: enable, conf t, interface g0/0, ip address <ip> <mask>, no shutdown, ip route <net> <mask> <next-hop>, do show ip route\n' : 'Reyz Command Prompt\nKetik: ping <ip>, ipconfig, ipconfig /renew, cls\n');
   }
 
   /// Simpan isian Config langsung saat diketik.
@@ -964,6 +1171,10 @@ class GuidePage extends StatelessWidget {
           'PC1 192.168.1.2 gateway 192.168.1.1, PC2 192.168.2.2 gateway 192.168.2.1. Lalu di router:\n'
           'enable\nconf t\ninterface g0/0\nip address 192.168.1.1 255.255.255.0\nno shutdown\nexit\n'
           'interface g0/1\nip address 192.168.2.1 255.255.255.0\nno shutdown\nend\ndo show ip route\n\n'
+          'BERKAS & TEMPLATE\n\n'
+          'Menu Berkas (kiri): Export projek jadi file .rts, Import file .rts, dan Export canvas ke gambar PNG. Menu Template: Basic LAN, Router to Router, Smart Home IoT, dan lab latihan.\n\n'
+          'ROUTING STATIS\n\n'
+          'Di CLI router (mode conf t): ip route 192.168.2.0 255.255.255.0 10.0.0.2 (jaringan, mask, next-hop). Lihat hasilnya dengan do show ip route (baris S = static). Ping lintas router butuh rute di kedua arah.\n\n'
           'INDIKATOR KABEL\n\n'
           'Kabel bercahaya HIJAU kalau kedua ujungnya sudah terkonfigurasi, MERAH kalau ada yang belum (PC belum diisi IP, router belum ada interface yang no shutdown). Switch, Hub, AP, dan IoT tidak perlu konfigurasi.\n\n'
           'DHCP\n\n'

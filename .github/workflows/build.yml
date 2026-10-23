@@ -5,6 +5,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -21,19 +24,34 @@ jobs:
           channel: stable
           cache: true
 
-      # Repo cuma berisi lib/ dan pubspec.yaml, jadi folder android dibuat otomatis di sini
+      # Repo cuma berisi lib/, pubspec.yaml, keystore/; folder android dibuat otomatis di sini
       - name: Buat folder android
         run: |
           flutter create --platforms=android --project-name reyz_tracer --org com.reyz _tmp
           cp -r _tmp/android android
           rm -rf _tmp
           sed -i 's/android:label="[^"]*"/android:label="Reyz Tracer Simulation"/' android/app/src/main/AndroidManifest.xml
+          sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <application#' android/app/src/main/AndroidManifest.xml
+
+      # Keystore tetap: tanpa ini tiap build punya tanda tangan beda, jadi harus uninstall dulu
+      - name: Pakai keystore tetap
+        run: |
+          mkdir -p ~/.android
+          cp keystore/debug.keystore ~/.android/debug.keystore
 
       - run: flutter pub get
-      - run: flutter build apk --release
+      - run: flutter build apk --release --dart-define=BUILD=${{ github.run_number }}
 
       - uses: actions/upload-artifact@v4
         with:
           name: Reyz-Tracer-Simulation-APK
           path: build/app/outputs/flutter-apk/app-release.apk
-          
+
+      # Rilis otomatis, dipakai fitur Update di dalam aplikasi
+      - name: Buat release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Build ${{ github.run_number }}
+          files: build/app/outputs/flutter-apk/app-release.apk
+          make_latest: true

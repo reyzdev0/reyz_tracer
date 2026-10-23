@@ -6,7 +6,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-const kBg = Color(0xFF0A1931), kAcc = Color(0xFF00A8FF), kCard = Color(0xFF12284A);
+// Tema: 0 = Biru Dongker (default), 1 = Hitam, 2 = Putih
+final themeIdx = ValueNotifier<int>(0), showGrid = ValueNotifier<bool>(true);
+Color get kBg => const [Color(0xFF0A1931), Color(0xFF000000), Color(0xFFF2F4F7)][themeIdx.value];
+Color get kCard => const [Color(0xFF12284A), Color(0xFF151515), Color(0xFFFFFFFF)][themeIdx.value];
+Color get kAcc => const [Color(0xFF00A8FF), Color(0xFFFFFFFF), Color(0xFF000000)][themeIdx.value];
+Color get kFg => themeIdx.value == 2 ? Colors.black87 : Colors.white; // warna icon/teks utama
+Color get kFg2 => themeIdx.value == 2 ? Colors.black54 : kFg2;
 const _o = Offset(36, 30); // titik tengah icon device terhadap posisinya
 
 enum T { router, sw, hub, ap, wlc, pc, laptop, server, phone, printer, ipPhone, swSensor, motion, lamp, alarm, iotGw }
@@ -20,8 +26,8 @@ const tInfo = {
   T.swSensor: ('Saklar', Icons.toggle_off), T.motion: ('SensorGerak', Icons.directions_run), T.lamp: ('Lampu', Icons.lightbulb_outline),
   T.alarm: ('Alarm', Icons.notifications_off), T.iotGw: ('IoTGateway', Icons.device_hub),
 };
-const cbl = [
-  ('Straight', 'Garis hitam lurus', Colors.white70), ('Crossover', 'Merah putus-putus', Colors.redAccent),
+List<(String, String, Color)> get cbl => [
+  ('Straight', 'Garis hitam lurus', kFg2), ('Crossover', 'Merah putus-putus', Colors.redAccent),
   ('Fiber', 'Garis kuning', Colors.amber), ('Console', 'Garis biru', kAcc),
   ('Wireless', 'Putus-putus melengkung (ke AP)', Colors.cyanAccent),
 ];
@@ -31,6 +37,13 @@ bool passive(T t) => t.index >= T.sw.index && t.index <= T.wlc.index; // device 
 bool iot(T t) => t.index >= T.swSensor.index; // perangkat IoT
 bool sensor(T t) => t == T.swSensor || t == T.motion; // sumber sinyal
 bool actuator(T t) => t == T.lamp || t == T.alarm; // penerima sinyal
+/// Apakah device sudah terkonfigurasi? Switch/Hub/AP/IoT tidak butuh config (selalu siap).
+bool cfg(Dev d) {
+  if (d.t == T.router) return d.ifs.values.any((i) => i.up && ipn(i.ip) != null);
+  if (netDev(d.t) || iot(d.t)) return true;
+  return ipn(d.ip) != null && ipn(d.mask) != null;
+}
+
 bool lit(Dev d) => iot(d.t) && d.t != T.iotGw && d.on; // lagi aktif (bersinar)
 
 /// Warna indikator perangkat IoT saat aktif.
@@ -85,12 +98,14 @@ class Dev {
   final Map<String, Iface> ifs = {};
   final List<String> log = [];
   bool on = false; // status IoT: sensor aktif / aktuator menyala
+  bool dhcp = false, useDhcp = false; // dhcp = layanan DHCP di Server, useDhcp = client minta IP otomatis
+  String pool = '192.168.1.100', dgw = ''; int poolSize = 50; // pengaturan pool DHCP
   int mode = 0; String cur = ''; // mode CLI router: 0 user, 1 priv, 2 config, 3 config-if
   Dev(this.id, this.t, this.name, this.pos) { if (t == T.router) { ifs['g0/0'] = Iface(); ifs['g0/1'] = Iface(); } }
-  Map toJ() => {'id': id, 't': t.index, 'n': name, 'x': pos.dx, 'y': pos.dy, 'ip': ip, 'mk': mask, 'gw': gw, 'on': on,
+  Map toJ() => {'id': id, 't': t.index, 'n': name, 'x': pos.dx, 'y': pos.dy, 'ip': ip, 'mk': mask, 'gw': gw, 'on': on, 'dh': dhcp, 'ud': useDhcp, 'pl': pool, 'ps': poolSize, 'dg': dgw,
         'ifs': ifs.map((k, v) => MapEntry(k, [v.ip, v.mask, v.up]))};
   static Dev fromJ(Map j) {
-    final d = Dev(j['id'], T.values[j['t']], j['n'], Offset(j['x'], j['y']))..ip = j['ip']..mask = j['mk']..gw = j['gw']..on = j['on'] ?? false;
+    final d = Dev(j['id'], T.values[j['t']], j['n'], Offset(j['x'], j['y']))..ip = j['ip']..mask = j['mk']..gw = j['gw']..on = j['on'] ?? false..dhcp = j['dh'] ?? false..useDhcp = j['ud'] ?? false..pool = j['pl'] ?? '192.168.1.100'..poolSize = j['ps'] ?? 50..dgw = j['dg'] ?? '';
     (j['ifs'] as Map).forEach((k, v) => d.ifs[k] = Iface()..ip = v[0]..mask = v[1]..up = v[2]);
     return d;
   }
@@ -101,20 +116,26 @@ class Note { Offset pos; String text; Note(this.pos, this.text); }
 class PR { bool ok; String msg; List<int> path; PR(this.ok, this.msg, this.path); } // hasil ping
 
 /// Titik awal aplikasi: kunci layar ke mode landscape (miring).
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   SystemChrome.setPreferredOrientations([DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
+  final sp = await SharedPreferences.getInstance(); // muat pengaturan tema & grid
+  themeIdx.value = sp.getInt('theme') ?? 0;
+  showGrid.value = sp.getBool('grid') ?? true;
   runApp(const ReyzApp());
 }
 
 class ReyzApp extends StatelessWidget {
   const ReyzApp({super.key});
   @override
-  Widget build(BuildContext c) => MaterialApp(
-        title: 'Reyz Tracer Simulation', debugShowCheckedModeBanner: false,
-        theme: ThemeData.dark(useMaterial3: true).copyWith(
-            scaffoldBackgroundColor: kBg, colorScheme: const ColorScheme.dark(primary: kAcc, surface: kCard)),
-        home: const Sim());
+  Widget build(BuildContext c) => ValueListenableBuilder<int>(
+      valueListenable: themeIdx,
+      builder: (_, i, __) => MaterialApp(
+          title: 'Reyz Tracer Simulation', debugShowCheckedModeBanner: false,
+          theme: (i == 2 ? ThemeData.light(useMaterial3: true) : ThemeData.dark(useMaterial3: true)).copyWith(
+              scaffoldBackgroundColor: kBg,
+              colorScheme: i == 2 ? ColorScheme.light(primary: kAcc, surface: kCard) : ColorScheme.dark(primary: kAcc, surface: kCard)),
+          home: const Sim()));
 }
 
 class Sim extends StatefulWidget {
@@ -229,9 +250,17 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
     var w = raw.trim().toLowerCase().split(RegExp(r'\s+'));
     if (d.t != T.router) {
       if (w[0] == 'ping') return w.length < 2 ? 'Pemakaian: ping <ip>' : pingOut(d, w[1]);
-      if (w[0] == 'ipconfig') return 'IPv4 Address. . . . : ${d.ip}\nSubnet Mask . . . . : ${d.mask}\nDefault Gateway . . : ${d.gw}';
+      if (w[0] == 'ipconfig') {
+        if (w.length > 1 && w[1] == '/release') { d.ip = ''; d.gw = ''; return 'IP Address dilepas.'; }
+        if (w.length > 1 && w[1] == '/renew') {
+          d.useDhcp = true;
+          final r = dhcpRequest(d);
+          return r == null ? 'DHCP gagal: tidak ada server DHCP aktif yang terhubung' : 'DHCP berhasil. IP baru: $r';
+        }
+        return 'DHCP . . . . . . . . : ${d.useDhcp ? 'Aktif' : 'Tidak'}\nIPv4 Address. . . . : ${d.ip}\nSubnet Mask . . . . : ${d.mask}\nDefault Gateway . . : ${d.gw}';
+      }
       if (w[0] == 'cls') return '\u0000';
-      return 'Perintah tidak dikenal. Coba: ping, ipconfig, cls';
+      return 'Perintah tidak dikenal. Coba: ping, ipconfig, ipconfig /renew, ipconfig /release, cls';
     }
     var m = d.mode;
     const bad = '% Perintah salah atau belum di mode yang benar';
@@ -316,6 +345,51 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
     pduTo(e[0], e[1]);
   }
 
+  /// DHCP: client minta IP ke Server DHCP yang satu jaringan (Layer 2). Return IP yang didapat, null kalau gagal.
+  String? dhcpRequest(Dev c) {
+    for (final sv in devs.where((x) => x != c && x.t == T.server && x.dhcp && ipn(x.ip) != null)) {
+      if (l2(c.id, sv.id) == null) continue;
+      final base = ipn(sv.pool);
+      if (base == null) continue;
+      for (var i = 0; i < sv.poolSize; i++) {
+        final cand = ips(base + i);
+        final used = cand == sv.ip || devs.any((x) => x != c && (x.ip == cand || x.ifs.values.any((f) => f.ip == cand)));
+        if (!used) { c.ip = cand; c.mask = sv.mask; c.gw = sv.dgw; return cand; }
+      }
+    }
+    return null;
+  }
+
+  /// Client DHCP yang belum punya IP otomatis meminta IP.
+  void autoDhcp() { for (final c in devs.where((x) => x.useDhcp && x.ip.isEmpty)) dhcpRequest(c); }
+
+  /// Refresh umum: DHCP + trigger IoT + tampilan.
+  void touch() => setState(() { autoDhcp(); propagate(); });
+
+  /// Ganti tema lalu simpan pilihan.
+  Future<void> setTheme(int i) async {
+    themeIdx.value = i;
+    setState(() {});
+    (await SharedPreferences.getInstance()).setInt('theme', i);
+  }
+
+  /// Pengaturan: tema (Biru / Hitam / Putih), grid, kosongkan canvas.
+  void settings() => showModalBottomSheet(
+      context: context, backgroundColor: kCard,
+      builder: (ctx) => StatefulBuilder(builder: (_, ss) => ListView(shrinkWrap: true, children: [
+            ListTile(dense: true, title: Text('Tema Aplikasi', style: TextStyle(color: kAcc))),
+            for (var i = 0; i < 3; i++)
+              ListTile(
+                  dense: true, title: Text(const ['Biru Dongker (default)', 'Hitam', 'Putih'][i]),
+                  trailing: themeIdx.value == i ? Icon(Icons.check, color: kAcc) : null,
+                  onTap: () { Navigator.pop(ctx); setTheme(i); }),
+            SwitchListTile(dense: true, title: const Text('Tampilkan grid'), value: showGrid.value, onChanged: (v) async {
+              showGrid.value = v; setState(() {}); ss(() {});
+              (await SharedPreferences.getInstance()).setBool('grid', v);
+            }),
+            ListTile(dense: true, leading: const Icon(Icons.layers_clear), title: const Text('Kosongkan canvas'), onTap: () { Navigator.pop(ctx); fromJ({'devs': [], 'links': [], 'notes': []}); }),
+          ])));
+
   /// LOGIKA TRIGGER IoT: status tiap Lampu/Alarm = ON kalau ada sensor ON yang terhubung (langsung atau lewat IoT Gateway).
   void propagate() {
     for (final a in devs.where((d) => actuator(d.t))) {
@@ -346,16 +420,16 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
         if (links.any((l) => (l.a == a && l.b == d.id) || (l.a == d.id && l.b == a))) { toast(false, 'Kedua device sudah terhubung'); return; }
         final ap = byId(a).t == T.ap || d.t == T.ap || byId(a).t == T.wlc || d.t == T.wlc || iot(byId(a).t) || iot(d.t);
         if (cable == 4 && !ap) { toast(false, 'Kabel wireless harus ke Access Point atau perangkat IoT'); return; }
-        setState(() { links.add(Link(a, d.id, cable)); propagate(); });
+        setState(() { links.add(Link(a, d.id, cable)); propagate(); autoDhcp(); });
       case Tool.ping:
         if (first == null) { setState(() => first = d.id); return; }
         final s = byId(first!);
         setState(() => first = null);
         if (s != d) pduTo(s, d);
       default:
-        if (!iot(d.t)) { showDialog(context: context, builder: (_) => DevDialog(d, this, () => setState(() {}))); return; }
+        if (!iot(d.t)) { Navigator.push(context, MaterialPageRoute(builder: (_) => DevDialog(d, this, touch))); return; }
         if (tool == Tool.select && sensor(d.t)) { setState(() { d.on = !d.on; propagate(); }); return; } // tap sensor = toggle ON/OFF
-        showDialog(context: context, builder: (_) => IotDialog(d, this, () => setState(() {})));
+        showDialog(context: context, builder: (_) => IotDialog(d, this, touch));
     }
   }
 
@@ -363,7 +437,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
     final c = TextEditingController(text: init);
     return showDialog<String>(
         context: context,
-        builder: (_) => AlertDialog(backgroundColor: kCard, title: Text(title), content: TextField(controller: c, autofocus: true), actions: [
+        builder: (_) => AlertDialog(scrollable: true, backgroundColor: kCard, title: Text(title), content: TextField(controller: c, autofocus: true), actions: [
               TextButton(onPressed: () => Navigator.pop(context), child: const Text('Batal')),
               FilledButton(onPressed: () => Navigator.pop(context, c.text.trim()), child: const Text('OK')),
             ]));
@@ -437,7 +511,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
         links..clear()..addAll((j['links'] as List).map((e) => Link(e[0], e[1], e[2])));
         notes..clear()..addAll((j['notes'] as List).map((e) => Note(Offset(e[0], e[1]), e[2])));
         nid = devs.fold(0, (m, d) => d.id > m ? d.id : m) + 1;
-        first = null; run = null; propagate();
+        first = null; run = null; propagate(); autoDhcp();
       });
 
   /// Simpan topologi ke memori HP.
@@ -480,17 +554,34 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
     });
   }
 
+  /// Lab DHCP: 1 Server DHCP + 2 PC yang minta IP otomatis.
+  void lab4() {
+    fromJ({'devs': [], 'links': [], 'notes': []});
+    final sv = add(T.server, const Offset(120, 250), ip: '192.168.1.1')..dhcp = true..pool = '192.168.1.100'..poolSize = 20..dgw = '192.168.1.1';
+    final sw = add(T.sw, const Offset(380, 250));
+    final a = add(T.pc, const Offset(640, 150));
+    final b = add(T.pc, const Offset(640, 350));
+    a.useDhcp = true;
+    b.useDhcp = true;
+    setState(() {
+      links..add(Link(sv.id, sw.id, 0))..add(Link(sw.id, a.id, 0))..add(Link(sw.id, b.id, 0));
+      autoDhcp();
+      notes.add(Note(const Offset(120, 130), 'PC1 & PC2 pakai DHCP. Buka PC > Command Prompt, coba: ipconfig lalu ping 192.168.1.1'));
+    });
+  }
+
   /// Daftar contoh lab + projek tersimpan.
   Future<void> projects() async {
     final sp = await SharedPreferences.getInstance();
     final ks = sp.getKeys().where((k) => k.startsWith('p_')).toList();
     if (!mounted) return;
     showModalBottomSheet(context: context, backgroundColor: kCard, builder: (_) => ListView(children: [
-          const ListTile(title: Text('Contoh Lab', style: TextStyle(color: kAcc))),
+          ListTile(title: Text('Contoh Lab', style: TextStyle(color: kAcc))),
           ListTile(leading: const Icon(Icons.science), title: const Text('Lab 2 PC 1 Switch'), onTap: () { Navigator.pop(context); lab1(); }),
           ListTile(leading: const Icon(Icons.science), title: const Text('Lab 2 Jaringan 1 Router'), onTap: () { Navigator.pop(context); lab2(); }),
           ListTile(leading: const Icon(Icons.lightbulb), title: const Text('Lab IoT Saklar & Lampu'), onTap: () { Navigator.pop(context); lab3(); }),
-          const ListTile(title: Text('Projek tersimpan', style: TextStyle(color: kAcc))),
+          ListTile(leading: const Icon(Icons.settings_ethernet), title: const Text('Lab DHCP Server & 2 PC'), onTap: () { Navigator.pop(context); lab4(); }),
+          ListTile(title: Text('Projek tersimpan', style: TextStyle(color: kAcc))),
           for (final k in ks)
             ListTile(
                 title: Text(k.substring(2)), onTap: () { Navigator.pop(context); fromJ(jsonDecode(sp.getString(k)!)); },
@@ -515,9 +606,9 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
           Container(
               width: 60, height: 60,
               decoration: BoxDecoration(color: kCard, borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: first == d.id ? Colors.white : (lit(d) ? stateColor(d) : kAcc), width: 1.5),
+                  border: Border.all(color: first == d.id ? kFg : (lit(d) ? stateColor(d) : kAcc), width: 1.5),
                   boxShadow: [BoxShadow(color: (lit(d) ? stateColor(d) : kAcc).withAlpha(lit(d) ? 190 : 60), blurRadius: lit(d) ? 28 : 12, spreadRadius: lit(d) ? 4 : 0)]),
-              child: Icon(icn(d), size: 32, color: iot(d.t) ? (d.t == T.iotGw ? kAcc : (d.on ? stateColor(d) : Colors.grey)) : (netDev(d.t) ? kAcc : Colors.white))),
+              child: Icon(icn(d), size: 32, color: iot(d.t) ? (d.t == T.iotGw ? kAcc : (d.on ? stateColor(d) : Colors.grey)) : (netDev(d.t) ? kAcc : kFg))),
           const SizedBox(height: 4),
           Text(d.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11)),
           if (iot(d.t) && d.t != T.iotGw) Text(d.on ? 'ON' : 'OFF', style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: d.on ? stateColor(d) : Colors.grey)),
@@ -531,17 +622,18 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
           child: Container(
               padding: const EdgeInsets.all(8), constraints: const BoxConstraints(maxWidth: 200),
               decoration: BoxDecoration(color: const Color(0xFF3A3410), borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.amber)),
-              child: Text(n.text, style: const TextStyle(fontSize: 12)))));
+              child: Text(n.text, style: const TextStyle(fontSize: 12, color: Colors.white)))));
 
   @override
   Widget build(BuildContext context) {
     const tools = {Tool.select: Icons.near_me, Tool.hand: Icons.pan_tool, Tool.delete: Icons.delete, Tool.inspect: Icons.search, Tool.note: Icons.sticky_note_2, Tool.ping: Icons.mail_outline};
     Widget nav(IconData i, String t, VoidCallback f, {bool on = false}) => InkWell(
         onTap: f, child: Padding(padding: const EdgeInsets.symmetric(vertical: 10), child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Icon(i, color: on ? kAcc : Colors.white70), Text(t, style: TextStyle(fontSize: 11, color: on ? kAcc : Colors.white70)),
+          Icon(i, color: on ? kAcc : kFg2), Text(t, style: TextStyle(fontSize: 11, color: on ? kAcc : kFg2)),
         ])));
     return Scaffold(
       appBar: AppBar(toolbarHeight: 44, backgroundColor: kBg, title: const Text('Reyz Tracer Simulation', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)), actions: [
+        IconButton(icon: const Icon(Icons.settings), tooltip: 'Pengaturan', onPressed: settings),
         IconButton(icon: const Icon(Icons.folder_open), tooltip: 'Projek & Lab', onPressed: projects),
         IconButton(icon: const Icon(Icons.calculate), tooltip: 'Kalkulator Subnet', onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const CalcPage()))),
         IconButton(icon: const Icon(Icons.menu_book), tooltip: 'Panduan', onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const GuidePage()))),
@@ -572,7 +664,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
               decoration: BoxDecoration(color: kCard.withAlpha(235), borderRadius: BorderRadius.circular(14)),
               child: Row(mainAxisSize: MainAxisSize.min, children: [
                 for (final e in tools.entries)
-                  IconButton(tooltip: e.key.name, color: tool == e.key ? kAcc : Colors.white70, icon: Icon(e.value), onPressed: () => setState(() { tool = e.key; first = null; })),
+                  IconButton(tooltip: e.key.name, color: tool == e.key ? kAcc : kFg2, icon: Icon(e.value), onPressed: () => setState(() { tool = e.key; first = null; })),
               ])))),
           Positioned(bottom: 8, left: 0, right: 0, child: Center(child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -599,11 +691,22 @@ class Pt extends CustomPainter {
   void paint(Canvas cv, Size sz) {
     final dots = <Offset>[];
     for (double x = 0; x < sz.width; x += 60) for (double y = 0; y < sz.height; y += 60) dots.add(Offset(x, y));
-    cv.drawPoints(ui.PointMode.points, dots, Paint()..color = Colors.white12..strokeWidth = 2..strokeCap = StrokeCap.round);
+    if (showGrid.value) cv.drawPoints(ui.PointMode.points, dots, Paint()..color = kFg.withAlpha(30)..strokeWidth = 2..strokeCap = StrokeCap.round);
     final mp = {for (final d in devs) d.id: d};
     for (final l in links) {
       final a = mp[l.a]!.pos + _o, b = mp[l.b]!.pos + _o;
       final p = Paint()..style = PaintingStyle.stroke..strokeWidth = 2.5;
+      // kabel hijau = kedua ujung sudah terkonfigurasi, merah = ada yang belum
+      final ok = cfg(mp[l.a]!) && cfg(mp[l.b]!);
+      final halo = Paint()..style = PaintingStyle.stroke..strokeWidth = 9..strokeCap = StrokeCap.round..color = (ok ? Colors.greenAccent : Colors.redAccent).withAlpha(120);
+      if (l.c == 4) {
+        final v0 = b - a, m0 = (a + b) / 2;
+        final double l0 = v0.distance == 0 ? 1.0 : v0.distance;
+        final n0 = Offset(-v0.dy, v0.dx) / l0 * 40;
+        cv.drawPath(Path()..moveTo(a.dx, a.dy)..quadraticBezierTo(m0.dx + n0.dx, m0.dy + n0.dy, b.dx, b.dy), halo);
+      } else {
+        cv.drawLine(a, b, halo);
+      }
       switch (l.c) {
         case 0:
           cv.drawLine(a, b, p..color = Colors.black..strokeWidth = 5);
@@ -620,10 +723,10 @@ class Pt extends CustomPainter {
           final n = Offset(-v.dy, v.dx) / len * 40;
           dash(cv, Path()..moveTo(a.dx, a.dy)..quadraticBezierTo(mid.dx + n.dx, mid.dy + n.dy, b.dx, b.dy), p..color = Colors.cyanAccent);
       }
-      for (final e in [[a, b], [b, a]]) { // titik ijo = kabel tersambung
-        final u = e[1] - e[0];
+      for (final e in [(a, b, cfg(mp[l.a]!)), (b, a, cfg(mp[l.b]!))]) { // titik ujung: hijau = terkonfigurasi, merah = belum
+        final u = e.$2 - e.$1;
         final double ul = u.distance == 0 ? 1.0 : u.distance;
-        cv.drawCircle(e[0] + u / ul * 34, 5, Paint()..color = Colors.greenAccent);
+        cv.drawCircle(e.$1 + u / ul * 34, 5, Paint()..color = e.$3 ? Colors.greenAccent : Colors.redAccent);
       }
     }
     final r = run;
@@ -639,7 +742,7 @@ class Pt extends CustomPainter {
   bool shouldRepaint(covariant CustomPainter o) => true;
 }
 
-/// Popup setting device: tab Config + Command Prompt / CLI.
+/// Halaman setting device (layar penuh supaya tidak ketutup keyboard): tab Config, DHCP (khusus Server), dan Command Prompt / CLI dengan kolom input ala chat.
 class DevDialog extends StatefulWidget {
   final Dev d; final SimState s; final VoidCallback refresh;
   const DevDialog(this.d, this.s, this.refresh, {super.key});
@@ -650,65 +753,121 @@ class DevDialog extends StatefulWidget {
 class _DevDlgState extends State<DevDialog> {
   Dev get d => widget.d;
   late final n = TextEditingController(text: d.name), ip = TextEditingController(text: d.ip),
-      mk = TextEditingController(text: d.mask), gw = TextEditingController(text: d.gw), cmd = TextEditingController();
+      mk = TextEditingController(text: d.mask), gw = TextEditingController(text: d.gw), cmd = TextEditingController(),
+      pool = TextEditingController(text: d.pool), psz = TextEditingController(text: '${d.poolSize}'), dgw = TextEditingController(text: d.dgw);
   final sc = ScrollController(), fn = FocusNode();
+  String msg = '';
 
   @override
   void initState() {
     super.initState();
-    if (d.log.isEmpty) d.log.add(d.t == T.router ? 'Reyz Router CLI\nKetik: enable, conf t, interface g0/0, ip address <ip> <mask>, no shutdown, do show ip route\n' : 'Reyz Command Prompt\nKetik: ping <ip>, ipconfig, cls\n');
+    if (d.log.isEmpty) d.log.add(d.t == T.router ? 'Reyz Router CLI\nKetik: enable, conf t, interface g0/0, ip address <ip> <mask>, no shutdown, do show ip route\n' : 'Reyz Command Prompt\nKetik: ping <ip>, ipconfig, ipconfig /renew, cls\n');
   }
 
   /// Simpan isian Config langsung saat diketik.
   void save() {
-    d.name = n.text; d.ip = ip.text.trim(); d.mask = mk.text.trim(); d.gw = gw.text.trim();
+    d.name = n.text; d.pool = pool.text.trim(); d.poolSize = int.tryParse(psz.text.trim()) ?? d.poolSize; d.dgw = dgw.text.trim();
+    if (!d.useDhcp) { d.ip = ip.text.trim(); d.mask = mk.text.trim(); d.gw = gw.text.trim(); }
+    widget.refresh();
+    if (mounted) setState(() {});
+  }
+
+  /// Salin nilai IP dari device ke kolom teks.
+  void sync() { ip.text = d.ip; mk.text = d.mask; gw.text = d.gw; }
+
+  /// Nyalakan / matikan DHCP pada client.
+  void applyDhcp(bool v) {
+    setState(() {
+      d.useDhcp = v;
+      if (v) {
+        d.ip = ''; d.gw = '';
+        final r = widget.s.dhcpRequest(d);
+        msg = r == null ? 'DHCP gagal: tidak ada server DHCP aktif yang terhubung' : 'DHCP berhasil, IP: $r';
+      } else {
+        msg = '';
+      }
+      sync();
+    });
     widget.refresh();
   }
 
-  Widget field(TextEditingController c, String l) => Padding(
+  /// Kirim perintah (tombol kirim / enter), hasilnya tampil di layar terminal.
+  void send() {
+    final v = cmd.text;
+    if (v.trim().isEmpty) return;
+    setState(() {
+      d.log.add('${widget.s.prompt(d)}$v');
+      final o = widget.s.cli(d, v);
+      if (o == '\u0000') d.log.clear(); else if (o.isNotEmpty) d.log.add(o);
+      sync();
+    });
+    cmd.clear(); fn.requestFocus(); widget.refresh();
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (sc.hasClients) sc.jumpTo(sc.position.maxScrollExtent); });
+  }
+
+  Widget field(TextEditingController c, String l, {bool en = true, bool num = true}) => Padding(
       padding: const EdgeInsets.only(bottom: 10),
-      child: TextField(controller: c, onChanged: (_) => save(), keyboardType: l == 'Nama Device' ? null : TextInputType.number, decoration: InputDecoration(labelText: l, border: const OutlineInputBorder())));
+      child: TextField(
+          controller: c, enabled: en, onChanged: (_) => save(), keyboardType: num ? TextInputType.number : null,
+          decoration: InputDecoration(labelText: l, isDense: true, border: const OutlineInputBorder())));
 
   Widget config() => ListView(padding: const EdgeInsets.all(12), children: [
-        field(n, 'Nama Device'),
-        if (!netDev(d.t)) ...[field(ip, 'IP Address'), field(mk, 'Subnet Mask'), field(gw, 'Gateway')],
+        field(n, 'Nama Device', num: false),
+        if (!netDev(d.t)) ...[
+          SwitchListTile(dense: true, contentPadding: EdgeInsets.zero, title: const Text('DHCP (IP otomatis)'), value: d.useDhcp, onChanged: applyDhcp),
+          if (msg.isNotEmpty) Padding(padding: const EdgeInsets.only(bottom: 8), child: Text(msg, style: TextStyle(color: msg.startsWith('DHCP gagal') ? Colors.red : Colors.green))),
+          Row(children: [
+            Expanded(child: field(ip, 'IP Address', en: !d.useDhcp)), const SizedBox(width: 8),
+            Expanded(child: field(mk, 'Subnet Mask', en: !d.useDhcp)), const SizedBox(width: 8),
+            Expanded(child: field(gw, 'Gateway', en: !d.useDhcp)),
+          ]),
+        ],
         if (d.t == T.router) ...[
           const Text('Interface (atur lewat tab CLI):'),
           for (final e in d.ifs.entries) Text('${e.key}: ${e.value.ip.isEmpty ? 'belum diatur' : '${e.value.ip} / ${e.value.mask}'} (${e.value.up ? 'up' : 'down'})'),
         ],
+        if (!passive(d.t)) Padding(padding: const EdgeInsets.only(top: 8), child: Text(cfg(d) ? 'Status: terkonfigurasi (kabel hijau)' : 'Status: belum terkonfigurasi (kabel merah)', style: TextStyle(color: cfg(d) ? Colors.green : Colors.red))),
         if (passive(d.t)) const Text('Device ini tidak butuh IP. Cukup sambungkan kabel.'),
       ]);
 
+  Widget dhcpTab() => ListView(padding: const EdgeInsets.all(12), children: [
+        SwitchListTile(dense: true, contentPadding: EdgeInsets.zero, title: const Text('Layanan DHCP'), subtitle: Text(d.dhcp ? 'Aktif' : 'Mati'), value: d.dhcp, onChanged: (v) { setState(() => d.dhcp = v); widget.refresh(); }),
+        Row(children: [
+          Expanded(child: field(pool, 'IP awal pool')), const SizedBox(width: 8),
+          Expanded(child: field(psz, 'Jumlah alamat')), const SizedBox(width: 8),
+          Expanded(child: field(dgw, 'Default Gateway')),
+        ]),
+        Text('Subnet mask pool mengikuti mask server (${d.mask}). Server harus punya IP, dan client harus satu jaringan (tersambung lewat switch/hub/AP).'),
+      ]);
+
+  /// Terminal + kolom input ala chat di bagian bawah (naik di atas keyboard).
   Widget term() => Column(children: [
         Expanded(child: Container(
             color: Colors.black, width: double.infinity, padding: const EdgeInsets.all(8),
             child: SingleChildScrollView(controller: sc, child: Text(d.log.join('\n'), style: const TextStyle(color: Colors.greenAccent, fontFamily: 'monospace', fontSize: 12))))),
-        TextField(
-            controller: cmd, focusNode: fn, autocorrect: false,
-            decoration: InputDecoration(prefixText: widget.s.prompt(d), hintText: 'ketik perintah'),
-            onSubmitted: (v) {
-              setState(() {
-                d.log.add('${widget.s.prompt(d)}$v');
-                final o = widget.s.cli(d, v);
-                if (o == '\u0000') d.log.clear(); else if (o.isNotEmpty) d.log.add(o);
-              });
-              cmd.clear(); fn.requestFocus(); widget.refresh();
-              WidgetsBinding.instance.addPostFrameCallback((_) { if (sc.hasClients) sc.jumpTo(sc.position.maxScrollExtent); });
-            }),
+        Container(
+            color: kCard, padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
+            child: Row(children: [
+              Text(widget.s.prompt(d), style: TextStyle(color: kAcc, fontFamily: 'monospace', fontSize: 12)),
+              const SizedBox(width: 6),
+              Expanded(child: TextField(
+                  controller: cmd, focusNode: fn, autocorrect: false, enableSuggestions: false, textInputAction: TextInputAction.send, onSubmitted: (_) => send(),
+                  decoration: InputDecoration(
+                      isDense: true, hintText: 'Ketik perintah...', filled: true,
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide.none),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10)))),
+              IconButton(icon: const Icon(Icons.send), color: kAcc, onPressed: send),
+            ])),
       ]);
 
   @override
   Widget build(BuildContext context) {
-    final cli = !passive(d.t);
-    final tabs = ['Config', if (cli) d.t == T.router ? 'CLI' : 'Command Prompt'];
-    return Dialog(
-        backgroundColor: kCard, insetPadding: const EdgeInsets.all(12),
-        child: SizedBox(width: 520, height: MediaQuery.of(context).size.height * .88, child: DefaultTabController(length: tabs.length, child: Column(children: [
-          Padding(padding: const EdgeInsets.all(12), child: Text(d.name, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
-          TabBar(tabs: [for (final t in tabs) Tab(text: t)]),
-          Expanded(child: TabBarView(children: [config(), if (cli) term()])),
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Tutup')),
-        ]))));
+    final cli = !passive(d.t), dh = d.t == T.server;
+    final tabs = ['Config', if (dh) 'DHCP', if (cli) d.t == T.router ? 'CLI' : 'Command Prompt'];
+    return DefaultTabController(length: tabs.length, child: Scaffold(
+      appBar: AppBar(toolbarHeight: 40, backgroundColor: kBg, title: Text(d.name, style: const TextStyle(fontSize: 16)), bottom: TabBar(tabs: [for (final t in tabs) Tab(text: t, height: 34)])),
+      body: TabBarView(children: [config(), if (dh) dhcpTab(), if (cli) term()]),
+    ));
   }
 }
 
@@ -741,7 +900,7 @@ class _CalcState extends State<CalcPage> {
         const SizedBox(height: 12),
         SizedBox(width: double.infinity, child: FilledButton(onPressed: hitung, child: const Text('Hitung'))),
         const SizedBox(height: 16),
-        SelectableText(out, style: const TextStyle(fontFamily: 'monospace', fontSize: 14, color: kAcc)),
+        SelectableText(out, style: TextStyle(fontFamily: 'monospace', fontSize: 14, color: kAcc)),
       ])));
 }
 
@@ -763,6 +922,12 @@ class GuidePage extends StatelessWidget {
           'PC1 192.168.1.2 gateway 192.168.1.1, PC2 192.168.2.2 gateway 192.168.2.1. Lalu di router:\n'
           'enable\nconf t\ninterface g0/0\nip address 192.168.1.1 255.255.255.0\nno shutdown\nexit\n'
           'interface g0/1\nip address 192.168.2.1 255.255.255.0\nno shutdown\nend\ndo show ip route\n\n'
+          'INDIKATOR KABEL\n\n'
+          'Kabel bercahaya HIJAU kalau kedua ujungnya sudah terkonfigurasi, MERAH kalau ada yang belum (PC belum diisi IP, router belum ada interface yang no shutdown). Switch, Hub, AP, dan IoT tidak perlu konfigurasi.\n\n'
+          'DHCP\n\n'
+          'Server > tab DHCP: aktifkan layanan, isi IP awal pool, jumlah alamat, gateway. Di PC > Config nyalakan DHCP (atau ketik ipconfig /renew di Command Prompt). Client dan server harus satu jaringan lewat switch/hub.\n\n'
+          'TEMA\n\n'
+          'Ikon gerigi (Pengaturan): pilih Biru Dongker, Hitam, atau Putih.\n\n'
           'SIMULASI IoT\n\n'
           'Menu Tambah > tab IoT & Sensor: Saklar, Sensor Gerak, Lampu, Alarm, IoT Gateway. Sambungkan pakai Kabel (sensor ke lampu langsung, atau lewat gateway). '
           'Tap Saklar / Sensor Gerak untuk ON/OFF, Lampu & Alarm ikut berubah otomatis. Tap Lampu/Alarm (atau tool Inspect) untuk buka panel, lalu tekan Update.\n\n'
@@ -807,7 +972,7 @@ class _IotState extends State<IotDialog> {
         if (actuator(d.t)) Text('Status: ${d.on ? 'ON (menyala)' : 'OFF (mati)'}\nOtomatis mengikuti sensor yang terhubung.'),
         if (d.t == T.iotGw) const Text('Gateway meneruskan sinyal sensor ke Lampu/Alarm.'),
         const SizedBox(height: 10),
-        const Text('Koneksi:', style: TextStyle(color: kAcc)),
+        Text('Koneksi:', style: TextStyle(color: kAcc)),
         if (conns.isEmpty) const Text('Belum ada kabel. Pakai tombol Kabel.'),
         for (final l in conns)
           ListTile(

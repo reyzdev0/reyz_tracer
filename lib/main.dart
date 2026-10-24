@@ -11,7 +11,7 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-const kVersion = '1.2.0';
+const kVersion = '1.3.0';
 const kBuild = int.fromEnvironment('BUILD', defaultValue: 0); // nomor build (diisi otomatis oleh GitHub Actions)
 
 // Tema: 0 = Biru Dongker (default), 1 = Hitam, 2 = Putih
@@ -23,28 +23,32 @@ Color get kFg => themeIdx.value == 2 ? Colors.black87 : Colors.white; // warna i
 Color get kFg2 => themeIdx.value == 2 ? Colors.black54 : Colors.white70;
 const _o = Offset(36, 30); // titik tengah icon device terhadap posisinya
 
-enum T { router, sw, hub, ap, wlc, pc, laptop, server, phone, printer, ipPhone, swSensor, motion, lamp, alarm, iotGw }
+enum T { router, sw, hub, ap, wlc, pc, laptop, server, phone, printer, ipPhone, swSensor, motion, lamp, alarm, iotGw, firewall, cloud, modem, tablet, smartTv, ipCam, tempSensor, doorLock, fan } // perangkat baru ditaruh di belakang supaya file lama tetap kebaca
 enum Tool { select, hand, delete, inspect, note, ping, cable }
 
 const tInfo = {
   T.router: ('Router', Icons.router), T.sw: ('Switch', Icons.lan), T.hub: ('Hub', Icons.hub),
-  T.ap: ('AccessPoint', Icons.wifi_tethering), T.wlc: ('WLC', Icons.settings_input_antenna),
+  T.ap: ('Access Point', Icons.wifi_tethering), T.wlc: ('WLC', Icons.settings_input_antenna),
   T.pc: ('PC', Icons.desktop_windows), T.laptop: ('Laptop', Icons.laptop), T.server: ('Server', Icons.dns),
-  T.phone: ('Smartphone', Icons.smartphone), T.printer: ('Printer', Icons.print), T.ipPhone: ('IPPhone', Icons.phone_in_talk),
-  T.swSensor: ('Saklar', Icons.toggle_off), T.motion: ('SensorGerak', Icons.directions_run), T.lamp: ('Lampu', Icons.lightbulb_outline),
-  T.alarm: ('Alarm', Icons.notifications_off), T.iotGw: ('IoTGateway', Icons.device_hub),
+  T.phone: ('Smartphone', Icons.smartphone), T.printer: ('Printer', Icons.print), T.ipPhone: ('IP Phone', Icons.phone_in_talk),
+  T.swSensor: ('Saklar', Icons.toggle_off), T.motion: ('Sensor Gerak', Icons.directions_run), T.lamp: ('Lampu', Icons.lightbulb_outline),
+  T.alarm: ('Alarm', Icons.notifications_off), T.iotGw: ('IoT Gateway', Icons.device_hub),
+  T.firewall: ('Firewall', Icons.security), T.cloud: ('Cloud', Icons.cloud), T.modem: ('Modem', Icons.settings_input_component),
+  T.tablet: ('Tablet', Icons.tablet_mac), T.smartTv: ('Smart TV', Icons.tv), T.ipCam: ('IP Camera', Icons.videocam),
+  T.tempSensor: ('Sensor Suhu', Icons.thermostat), T.doorLock: ('Door Lock', Icons.lock), T.fan: ('Kipas Angin', Icons.toys),
 };
+const tSub = {T.firewall: 'ASA', T.cloud: 'WAN / Internet', T.modem: 'DSL / Cable', T.ipCam: 'CCTV', T.tempSensor: 'DHT11', T.fan: 'Fan / AC'};
 List<(String, String, Color)> get cbl => [
   ('Straight', 'Garis hitam lurus', kFg2), ('Crossover', 'Merah putus-putus', Colors.redAccent),
   ('Fiber', 'Garis kuning', Colors.amber), ('Console', 'Garis biru', kAcc),
   ('Wireless', 'Putus-putus melengkung (ke AP)', Colors.cyanAccent),
 ];
 
-bool netDev(T t) => t.index <= T.wlc.index; // router, switch, hub, AP, WLC
-bool passive(T t) => t.index >= T.sw.index && t.index <= T.wlc.index; // device L2 (meneruskan frame)
-bool iot(T t) => t.index >= T.swSensor.index; // perangkat IoT
-bool sensor(T t) => t == T.swSensor || t == T.motion; // sumber sinyal
-bool actuator(T t) => t == T.lamp || t == T.alarm; // penerima sinyal
+bool netDev(T t) => const {T.router, T.sw, T.hub, T.ap, T.wlc, T.firewall, T.cloud, T.modem}.contains(t); // perangkat jaringan
+bool passive(T t) => const {T.sw, T.hub, T.ap, T.wlc, T.firewall, T.cloud, T.modem}.contains(t); // meneruskan frame (firewall transparan, cloud = WAN)
+bool iot(T t) => const {T.swSensor, T.motion, T.lamp, T.alarm, T.iotGw, T.tempSensor, T.doorLock, T.fan}.contains(t); // perangkat IoT
+bool sensor(T t) => const {T.swSensor, T.motion, T.tempSensor}.contains(t); // sumber sinyal
+bool actuator(T t) => const {T.lamp, T.alarm, T.doorLock, T.fan}.contains(t); // penerima sinyal
 /// Apakah device sudah terkonfigurasi? Switch/Hub/AP/IoT tidak butuh config (selalu siap).
 bool cfg(Dev d) {
   if (d.t == T.router) return d.ifs.values.any((i) => i.up && ipn(i.ip) != null);
@@ -54,9 +58,16 @@ bool cfg(Dev d) {
 
 bool lit(Dev d) => iot(d.t) && d.t != T.iotGw && d.on; // lagi aktif (bersinar)
 
+/// Teks status di bawah nama perangkat IoT.
+String stateLabel(Dev d) => switch (d.t) {
+      T.tempSensor => '${d.temp.round()}°C',
+      T.doorLock => d.on ? 'TERBUKA' : 'TERKUNCI',
+      _ => d.on ? 'ON' : 'OFF',
+    };
+
 /// Warna indikator perangkat IoT saat aktif.
 Color stateColor(Dev d) => switch (d.t) {
-      T.lamp => const Color(0xFFFFEB3B), T.alarm => Colors.redAccent, T.swSensor => Colors.greenAccent, T.motion => Colors.orangeAccent, _ => kAcc,
+      T.lamp => const Color(0xFFFFEB3B), T.alarm => Colors.redAccent, T.swSensor => Colors.greenAccent, T.motion => Colors.orangeAccent, T.tempSensor => Colors.deepOrangeAccent, T.doorLock => Colors.lightGreenAccent, T.fan => Colors.lightBlueAccent, _ => kAcc,
     };
 
 /// Icon device (icon IoT berubah sesuai ON/OFF).
@@ -65,6 +76,9 @@ IconData icn(Dev d) => switch (d.t) {
       T.lamp => d.on ? Icons.lightbulb : Icons.lightbulb_outline,
       T.alarm => d.on ? Icons.notifications_active : Icons.notifications_off,
       T.motion => Icons.directions_run,
+      T.tempSensor => Icons.thermostat,
+      T.doorLock => d.on ? Icons.lock_open : Icons.lock,
+      T.fan => Icons.toys,
       _ => tInfo[d.t]!.$2,
     };
 
@@ -107,14 +121,15 @@ class Dev {
   final List<List<String>> routes = []; // rute statis router: [network, mask, next-hop]
   final List<String> log = [];
   bool on = false; // status IoT: sensor aktif / aktuator menyala
+  double temp = 25, thr = 30; // Sensor Suhu: suhu terbaca & batas aktif (derajat C)
   bool dhcp = false, useDhcp = false; // dhcp = layanan DHCP di Server, useDhcp = client minta IP otomatis
   String pool = '192.168.1.100', dgw = ''; int poolSize = 50; // pengaturan pool DHCP
   int mode = 0; String cur = ''; // mode CLI router: 0 user, 1 priv, 2 config, 3 config-if
   Dev(this.id, this.t, this.name, this.pos) { if (t == T.router) { ifs['g0/0'] = Iface(); ifs['g0/1'] = Iface(); } }
-  Map toJ() => {'id': id, 't': t.index, 'n': name, 'x': pos.dx, 'y': pos.dy, 'ip': ip, 'mk': mask, 'gw': gw, 'on': on, 'dh': dhcp, 'ud': useDhcp, 'pl': pool, 'ps': poolSize, 'dg': dgw, 'rt': routes,
+  Map toJ() => {'id': id, 't': t.index, 'n': name, 'x': pos.dx, 'y': pos.dy, 'ip': ip, 'mk': mask, 'gw': gw, 'on': on, 'dh': dhcp, 'ud': useDhcp, 'pl': pool, 'ps': poolSize, 'dg': dgw, 'rt': routes, 'tp': temp, 'th': thr,
         'ifs': ifs.map((k, v) => MapEntry(k, [v.ip, v.mask, v.up]))};
   static Dev fromJ(Map j) {
-    final d = Dev(j['id'], T.values[j['t']], j['n'], Offset(j['x'], j['y']))..ip = j['ip']..mask = j['mk']..gw = j['gw']..on = j['on'] ?? false..dhcp = j['dh'] ?? false..useDhcp = j['ud'] ?? false..pool = j['pl'] ?? '192.168.1.100'..poolSize = j['ps'] ?? 50..dgw = j['dg'] ?? '';
+    final d = Dev(j['id'], T.values[j['t']], j['n'], Offset(j['x'], j['y']))..ip = j['ip']..mask = j['mk']..gw = j['gw']..on = j['on'] ?? false..dhcp = j['dh'] ?? false..useDhcp = j['ud'] ?? false..pool = j['pl'] ?? '192.168.1.100'..poolSize = j['ps'] ?? 50..dgw = j['dg'] ?? ''..temp = (j['tp'] ?? 25).toDouble()..thr = (j['th'] ?? 30).toDouble();
     (j['ifs'] as Map).forEach((k, v) => d.ifs[k] = Iface()..ip = v[0]..mask = v[1]..up = v[2]);
     for (final e in (j['rt'] ?? []) as List) d.routes.add(List<String>.from(e));
     return d;
@@ -151,6 +166,7 @@ class ReyzApp extends StatelessWidget {
           title: 'Reyz Tracer Simulation', debugShowCheckedModeBanner: false,
           theme: (i == 2 ? ThemeData.light(useMaterial3: true) : ThemeData.dark(useMaterial3: true)).copyWith(
               scaffoldBackgroundColor: kBg,
+              bottomSheetTheme: BottomSheetThemeData(backgroundColor: kCard, modalBackgroundColor: kCard, surfaceTintColor: Colors.transparent),
               colorScheme: i == 2 ? ColorScheme.light(primary: kAcc, surface: kCard) : ColorScheme.dark(primary: kAcc, surface: kCard)),
           home: const Sim()));
 }
@@ -176,7 +192,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
   /// Tambah device baru ke daftar.
   Dev add(T t, Offset p, {String ip = '', String gw = ''}) {
     final n = devs.where((d) => d.t == t).length + 1;
-    final d = Dev(nid++, t, '${tInfo[t]!.$1}$n', p)..ip = ip..gw = gw;
+    final d = Dev(nid++, t, '${tInfo[t]!.$1}${tInfo[t]!.$1.contains(' ') ? ' ' : ''}$n', p)..ip = ip..gw = gw;
     devs.add(d);
     return d;
   }
@@ -430,7 +446,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
       if (!mounted) return;
       if (n <= kBuild || apk.isEmpty) { toast(true, 'Sudah versi terbaru (build $kBuild)'); return; }
       showDialog(context: context, builder: (_) => AlertDialog(
-          backgroundColor: kCard, title: const Text('Update tersedia'),
+          backgroundColor: kCard, surfaceTintColor: Colors.transparent, title: const Text('Update tersedia'),
           content: Text('Build $n sudah tersedia (kamu: build $kBuild). Tekan Update, download APK-nya, lalu buka file-nya untuk memperbarui. Data projek tetap aman.'),
           actions: [
             TextButton(onPressed: () => Navigator.pop(context), child: const Text('Nanti')),
@@ -439,6 +455,83 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
     } catch (e) {
       if (mounted) toast(false, 'Gagal cek update: cek internet / nama repo');
     }
+  }
+
+  // ===== Riwayat Undo / Redo =====
+  final undoSt = <String>[], redoSt = <String>[];
+  bool eraseCable = false; // mode Hapus: false = hapus perangkat, true = hapus kabel saja
+
+  /// Foto kondisi canvas saat ini (JSON).
+  String snap() => jsonEncode(toJ());
+
+  /// Catat kondisi canvas SEBELUM sebuah perubahan (tambah/hapus, kabel, geser, rename, template).
+  void rec() {
+    undoSt.add(snap());
+    if (undoSt.length > 60) undoSt.removeAt(0);
+    redoSt.clear();
+  }
+
+  /// Dipakai halaman config: catat kondisi awal ke riwayat kalau ada yang berubah.
+  void commit(String before) {
+    if (before.isEmpty || snap() == before) return;
+    undoSt.add(before);
+    if (undoSt.length > 60) undoSt.removeAt(0);
+    redoSt.clear();
+    Future.microtask(() { if (mounted) setState(() {}); });
+  }
+
+  /// Undo: kembali ke langkah sebelumnya.
+  void undo() {
+    if (undoSt.isEmpty) return;
+    redoSt.add(snap());
+    fromJ(jsonDecode(undoSt.removeLast()), focus: false);
+  }
+
+  /// Redo: maju lagi ke langkah setelah undo.
+  void redo() {
+    if (redoSt.isEmpty) return;
+    undoSt.add(snap());
+    fromJ(jsonDecode(redoSt.removeLast()), focus: false);
+  }
+
+  /// Jarak titik p ke garis a-b.
+  double segDist(Offset p, Offset a, Offset b) {
+    final ab = b - a, len2 = ab.dx * ab.dx + ab.dy * ab.dy;
+    final t = len2 == 0 ? 0.0 : ((p - a).dx * ab.dx + (p - a).dy * ab.dy) / len2;
+    return (p - (a + ab * t.clamp(0.0, 1.0).toDouble())).distance;
+  }
+
+  /// Jarak titik p ke kabel l (kabel wireless berbentuk kurva).
+  double linkDist(Offset p, Link l) {
+    final a = byId(l.a).pos + _o, b = byId(l.b).pos + _o;
+    if (l.c != 4) return segDist(p, a, b);
+    final v = b - a, m = (a + b) / 2;
+    final double len = v.distance == 0 ? 1.0 : v.distance;
+    final c = m + Offset(-v.dy, v.dx) / len * 40; // titik kontrol kurva (sama dengan painter)
+    var best = double.infinity, prev = a;
+    for (var i = 1; i <= 24; i++) {
+      final t = i / 24, u = 1 - t, q = a * (u * u) + c * (2 * u * t) + b * (t * t);
+      best = math.min(best, segDist(p, prev, q));
+      prev = q;
+    }
+    return best;
+  }
+
+  /// Mode Hapus Kabel: putuskan kabel yang paling dekat dengan titik sentuh (perangkat tidak ikut terhapus).
+  void eraseLinkAt(Offset p) {
+    final lim = 22 / ctrl.value.getMaxScaleOnAxis();
+    Link? best;
+    var bd = lim;
+    for (final l in links) {
+      final dd = linkDist(p, l);
+      if (dd <= bd) { bd = dd; best = l; }
+    }
+    final hit = best;
+    if (hit == null) return;
+    final a = byId(hit.a).name, b = byId(hit.b).name;
+    rec();
+    setState(() { links.remove(hit); propagate(); });
+    toast(true, 'Kabel $a - $b diputus');
   }
 
   /// Geser tampilan canvas supaya semua device kelihatan.
@@ -452,7 +545,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
   Future<void> confirmLoad(VoidCallback f) async {
     if (devs.isNotEmpty) {
       final ok = await showDialog<bool>(context: context, builder: (_) => AlertDialog(
-          backgroundColor: kCard, title: const Text('Ganti canvas?'),
+          backgroundColor: kCard, surfaceTintColor: Colors.transparent, title: const Text('Ganti canvas?'),
           content: const Text('Topologi sekarang akan diganti. Simpan dulu lewat Save / Export kalau masih dibutuhkan.'),
           actions: [
             TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Batal')),
@@ -485,6 +578,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
       if (f == null || f.bytes == null) return;
       final j = jsonDecode(utf8.decode(f.bytes!));
       if (j is! Map || j['devs'] is! List || j['links'] is! List) throw 'bukan file .rts';
+      rec();
       fromJ(j);
       if (mounted) toast(true, 'Projek "${f.name}" dimuat');
     } catch (e) {
@@ -515,7 +609,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
         final icol = iot(d.t) ? (d.t == T.iotGw ? kAcc : (d.on ? stateColor(d) : Colors.grey)) : (netDev(d.t) ? kAcc : kFg);
         txt(cv, String.fromCharCode(ic.codePoint), c, TextStyle(fontFamily: ic.fontFamily, package: ic.fontPackage, fontSize: 32, color: icol));
         txt(cv, d.name, d.pos + const Offset(36, 70), TextStyle(fontSize: 11, color: kFg));
-        if (iot(d.t) && d.t != T.iotGw) txt(cv, d.on ? 'ON' : 'OFF', d.pos + const Offset(36, 83), TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: d.on ? stateColor(d) : Colors.grey));
+        if (iot(d.t) && d.t != T.iotGw) txt(cv, stateLabel(d), d.pos + const Offset(36, 83), TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: d.on ? stateColor(d) : Colors.grey));
       }
       for (final n in notes) {
         final tp = TextPainter(text: TextSpan(text: n.text, style: const TextStyle(fontSize: 12, color: Colors.white)), textDirection: TextDirection.ltr)..layout(maxWidth: 184);
@@ -534,8 +628,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
   }
 
   /// Menu Berkas: export / import .rts dan export gambar.
-  void files() => showModalBottomSheet(
-      context: context, backgroundColor: kCard,
+  void files() => showModalBottomSheet(context: context, backgroundColor: kCard, isScrollControlled: true, useSafeArea: true, constraints: const BoxConstraints(maxWidth: 640),
       builder: (ctx) => ListView(shrinkWrap: true, children: [
             ListTile(dense: true, title: Text('Berkas Projek', style: TextStyle(color: kAcc))),
             ListTile(dense: true, leading: const Icon(Icons.upload_file), title: const Text('Export projek (.rts)'), subtitle: const Text('Simpan topologi ke file'), onTap: () { Navigator.pop(ctx); exportRts(); }),
@@ -545,7 +638,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
 
   /// Template Basic LAN: 1 Switch, 2 PC, 1 Printer (192.168.1.0/24).
   void tplLan() {
-    fromJ({'devs': [], 'links': [], 'notes': []});
+    rec(); fromJ({'devs': [], 'links': [], 'notes': []});
     final sw = add(T.sw, const Offset(420, 260));
     final a = add(T.pc, const Offset(160, 120), ip: '192.168.1.10'), b = add(T.pc, const Offset(160, 400), ip: '192.168.1.11');
     final p = add(T.printer, const Offset(680, 260), ip: '192.168.1.20');
@@ -558,7 +651,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
 
   /// Template Router to Router: 2 router (kabel crossover), 2 subnet PC, ip route sudah terpasang.
   void tplRouter() {
-    fromJ({'devs': [], 'links': [], 'notes': []});
+    rec(); fromJ({'devs': [], 'links': [], 'notes': []});
     final a = add(T.pc, const Offset(80, 260), ip: '192.168.1.2', gw: '192.168.1.1');
     final s1 = add(T.sw, const Offset(280, 260)), r1 = add(T.router, const Offset(500, 260));
     final r2 = add(T.router, const Offset(760, 260)), s2 = add(T.sw, const Offset(980, 260));
@@ -579,7 +672,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
 
   /// Template Smart Home IoT: 1 IoT Gateway, 1 Sensor Gerak, 1 Lampu, 1 Alarm.
   void tplIot() {
-    fromJ({'devs': [], 'links': [], 'notes': []});
+    rec(); fromJ({'devs': [], 'links': [], 'notes': []});
     final mo = add(T.motion, const Offset(150, 260)), gw = add(T.iotGw, const Offset(450, 260));
     final la = add(T.lamp, const Offset(750, 140)), al = add(T.alarm, const Offset(750, 380));
     setState(() {
@@ -590,8 +683,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
   }
 
   /// Menu Lab Templates (template baru + lab latihan).
-  void templates() => showModalBottomSheet(
-      context: context, backgroundColor: kCard,
+  void templates() => showModalBottomSheet(context: context, backgroundColor: kCard, isScrollControlled: true, useSafeArea: true, constraints: const BoxConstraints(maxWidth: 640),
       builder: (ctx) => ListView(shrinkWrap: true, children: [
             ListTile(dense: true, title: Text('Lab Templates', style: TextStyle(color: kAcc))),
             for (final t in [
@@ -614,8 +706,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
   }
 
   /// Pengaturan: tema (Biru / Hitam / Putih), grid, kosongkan canvas.
-  void settings() => showModalBottomSheet(
-      context: context, backgroundColor: kCard,
+  void settings() => showModalBottomSheet(context: context, backgroundColor: kCard, isScrollControlled: true, useSafeArea: true, constraints: const BoxConstraints(maxWidth: 640),
       builder: (ctx) => StatefulBuilder(builder: (_, ss) => ListView(shrinkWrap: true, children: [
             ListTile(dense: true, title: Text('Tema Aplikasi', style: TextStyle(color: kAcc))),
             for (var i = 0; i < 3; i++)
@@ -628,7 +719,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
               (await SharedPreferences.getInstance()).setBool('grid', v);
             }),
             ListTile(dense: true, leading: const Icon(Icons.system_update), title: const Text('Cek Update aplikasi'), subtitle: Text('Versi $kVersion (build $kBuild)'), onTap: () { Navigator.pop(ctx); checkUpdate(); }),
-            ListTile(dense: true, leading: const Icon(Icons.layers_clear), title: const Text('Kosongkan canvas'), onTap: () { Navigator.pop(ctx); fromJ({'devs': [], 'links': [], 'notes': []}); }),
+            ListTile(dense: true, leading: const Icon(Icons.layers_clear), title: const Text('Kosongkan canvas'), onTap: () { Navigator.pop(ctx); rec(); fromJ({'devs': [], 'links': [], 'notes': []}); }),
           ])));
 
   /// LOGIKA TRIGGER IoT: status tiap Lampu/Alarm = ON kalau ada sensor ON yang terhubung (langsung atau lewat IoT Gateway).
@@ -652,6 +743,8 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
   void tap(Dev d) {
     switch (tool) {
       case Tool.delete:
+        if (eraseCable) { toast(false, 'Mode Hapus Kabel: tap garis kabelnya, bukan perangkat'); return; }
+        rec();
         setState(() { devs.remove(d); links.removeWhere((l) => l.a == d.id || l.b == d.id); run = null; propagate(); });
       case Tool.cable:
         if (first == null) { setState(() => first = d.id); return; }
@@ -661,6 +754,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
         if (links.any((l) => (l.a == a && l.b == d.id) || (l.a == d.id && l.b == a))) { toast(false, 'Kedua device sudah terhubung'); return; }
         final ap = byId(a).t == T.ap || d.t == T.ap || byId(a).t == T.wlc || d.t == T.wlc || iot(byId(a).t) || iot(d.t);
         if (cable == 4 && !ap) { toast(false, 'Kabel wireless harus ke Access Point atau perangkat IoT'); return; }
+        rec();
         setState(() { links.add(Link(a, d.id, cable)); propagate(); autoDhcp(); });
       case Tool.ping:
         if (first == null) { setState(() => first = d.id); return; }
@@ -669,7 +763,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
         if (s != d) pduTo(s, d);
       default:
         if (!iot(d.t)) { Navigator.push(context, MaterialPageRoute(builder: (_) => DevDialog(d, this, touch))); return; }
-        if (tool == Tool.select && sensor(d.t)) { setState(() { d.on = !d.on; propagate(); }); return; } // tap sensor = toggle ON/OFF
+        if (tool == Tool.select && sensor(d.t)) { setState(() { d.on = !d.on; if (d.t == T.tempSensor) d.temp = d.on ? d.thr + 5 : d.thr - 5; propagate(); }); return; } // tap sensor = toggle ON/OFF
         showDialog(context: context, builder: (_) => IotDialog(d, this, touch));
     }
   }
@@ -678,7 +772,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
     final c = TextEditingController(text: init);
     return showDialog<String>(
         context: context,
-        builder: (_) => AlertDialog(scrollable: true, backgroundColor: kCard, title: Text(title), content: TextField(controller: c, autofocus: true), actions: [
+        builder: (_) => AlertDialog(scrollable: true, backgroundColor: kCard, surfaceTintColor: Colors.transparent, title: Text(title), content: TextField(controller: c, autofocus: true), actions: [
               TextButton(onPressed: () => Navigator.pop(context), child: const Text('Batal')),
               FilledButton(onPressed: () => Navigator.pop(context, c.text.trim()), child: const Text('OK')),
             ]));
@@ -687,20 +781,20 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
   /// Tambah catatan teks di canvas.
   Future<void> addNote(Offset o) async {
     final t = await ask('Catatan', '');
-    if (t != null && t.isNotEmpty) setState(() => notes.add(Note(o, t)));
+    if (t != null && t.isNotEmpty) { rec(); setState(() => notes.add(Note(o, t))); }
   }
 
   /// Tekan lama device: ganti nama / hapus.
-  void menu(Dev d) => showModalBottomSheet(
-      context: context, backgroundColor: kCard,
+  void menu(Dev d) => showModalBottomSheet(context: context, backgroundColor: kCard, isScrollControlled: true, useSafeArea: true, constraints: const BoxConstraints(maxWidth: 640),
       builder: (_) => Column(mainAxisSize: MainAxisSize.min, children: [
             ListTile(leading: const Icon(Icons.edit), title: const Text('Ganti nama'), onTap: () async {
               Navigator.pop(context);
               final n = await ask('Nama device', d.name);
-              if (n != null && n.isNotEmpty) setState(() => d.name = n);
+              if (n != null && n.isNotEmpty) { rec(); setState(() => d.name = n); }
             }),
             ListTile(leading: const Icon(Icons.delete, color: Colors.redAccent), title: const Text('Hapus device'), onTap: () {
               Navigator.pop(context);
+              rec();
               setState(() { devs.remove(d); links.removeWhere((l) => l.a == d.id || l.b == d.id); propagate(); });
             }),
           ]));
@@ -709,6 +803,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
   void spawn(T t) {
     final sz = MediaQuery.of(context).size, k = (devs.length % 4) * 24.0;
     final c = ctrl.toScene(Offset(sz.width / 2, sz.height / 3));
+    rec();
     setState(() => add(t, c + Offset(k, k) - _o));
   }
 
@@ -716,12 +811,12 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
         for (final t in l)
           InkWell(onTap: () { Navigator.pop(context); spawn(t); }, child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
             Icon(tInfo[t]!.$2, color: kAcc, size: 32), const SizedBox(height: 4), Text(tInfo[t]!.$1, style: const TextStyle(fontSize: 12)),
+            if (tSub[t] != null) Text(tSub[t]!, style: TextStyle(fontSize: 9, color: kFg2)),
           ])),
       ]);
 
   /// Toolbox: 3 tab (Network Devices, End Devices, IoT & Sensor).
-  void addSheet() => showModalBottomSheet(
-      context: context, backgroundColor: kCard,
+  void addSheet() => showModalBottomSheet(context: context, backgroundColor: kCard, isScrollControlled: true, useSafeArea: true, constraints: const BoxConstraints(maxWidth: 640),
       builder: (_) => DefaultTabController(length: 3, child: SizedBox(height: 250, child: Column(children: [
             const TabBar(tabs: [Tab(text: 'Network Devices'), Tab(text: 'End Devices'), Tab(text: 'IoT & Sensor')]),
             Expanded(child: TabBarView(children: [
@@ -732,8 +827,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
           ]))));
 
   /// Pilih jenis kabel lalu tap 2 device.
-  void cableSheet() => showModalBottomSheet(
-      context: context, backgroundColor: kCard,
+  void cableSheet() => showModalBottomSheet(context: context, backgroundColor: kCard, isScrollControlled: true, useSafeArea: true, constraints: const BoxConstraints(maxWidth: 640),
       builder: (_) => ListView(shrinkWrap: true, children: [
             for (var i = 0; i < cbl.length; i++)
               ListTile(
@@ -747,12 +841,12 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
       };
 
   /// Muat topologi dari JSON.
-  void fromJ(Map j) => setState(() {
+  void fromJ(Map j, {bool focus = true}) => setState(() {
         devs..clear()..addAll((j['devs'] as List).map((e) => Dev.fromJ(e)));
         links..clear()..addAll((j['links'] as List).map((e) => Link(e[0], e[1], e[2])));
         notes..clear()..addAll(((j['notes'] ?? []) as List).map((e) => Note(Offset(e[0], e[1]), e[2])));
         nid = devs.fold(0, (m, d) => d.id > m ? d.id : m) + 1;
-        first = null; run = null; propagate(); autoDhcp(); focusAll();
+        first = null; run = null; propagate(); autoDhcp(); if (focus) focusAll();
       });
 
   /// Simpan topologi ke memori HP.
@@ -766,7 +860,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
 
   /// Lab 1: 2 PC + 1 Switch (sudah dikonfigurasi, tinggal ping).
   void lab1() {
-    fromJ({'devs': [], 'links': [], 'notes': []});
+    rec(); fromJ({'devs': [], 'links': [], 'notes': []});
     final a = add(T.pc, const Offset(120, 250), ip: '192.168.1.1'), s = add(T.sw, const Offset(360, 250));
     final b = add(T.pc, const Offset(600, 250), ip: '192.168.1.2');
     setState(() => links..add(Link(a.id, s.id, 0))..add(Link(s.id, b.id, 0)));
@@ -774,7 +868,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
 
   /// Lab 2: 2 jaringan + 1 Router (router belum dikonfigurasi, latihan CLI).
   void lab2() {
-    fromJ({'devs': [], 'links': [], 'notes': []});
+    rec(); fromJ({'devs': [], 'links': [], 'notes': []});
     final a = add(T.pc, const Offset(80, 300), ip: '192.168.1.2', gw: '192.168.1.1');
     final s1 = add(T.sw, const Offset(260, 300)), r = add(T.router, const Offset(450, 300)), s2 = add(T.sw, const Offset(640, 300));
     final b = add(T.pc, const Offset(820, 300), ip: '192.168.2.2', gw: '192.168.2.1');
@@ -786,7 +880,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
 
   /// Lab IoT: Saklar & Sensor Gerak -> Gateway -> Lampu & Alarm.
   void lab3() {
-    fromJ({'devs': [], 'links': [], 'notes': []});
+    rec(); fromJ({'devs': [], 'links': [], 'notes': []});
     final sw = add(T.swSensor, const Offset(150, 200)), mo = add(T.motion, const Offset(150, 420));
     final gw = add(T.iotGw, const Offset(450, 310)), la = add(T.lamp, const Offset(750, 200)), al = add(T.alarm, const Offset(750, 420));
     setState(() {
@@ -797,7 +891,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
 
   /// Lab DHCP: 1 Server DHCP + 2 PC yang minta IP otomatis.
   void lab4() {
-    fromJ({'devs': [], 'links': [], 'notes': []});
+    rec(); fromJ({'devs': [], 'links': [], 'notes': []});
     final sv = add(T.server, const Offset(120, 250), ip: '192.168.1.1')..dhcp = true..pool = '192.168.1.100'..poolSize = 20..dgw = '192.168.1.1';
     final sw = add(T.sw, const Offset(380, 250));
     final a = add(T.pc, const Offset(640, 150));
@@ -816,7 +910,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
     final sp = await SharedPreferences.getInstance();
     final ks = sp.getKeys().where((k) => k.startsWith('p_')).toList();
     if (!mounted) return;
-    showModalBottomSheet(context: context, backgroundColor: kCard, builder: (_) => ListView(children: [
+    showModalBottomSheet(context: context, backgroundColor: kCard, isScrollControlled: true, useSafeArea: true, constraints: const BoxConstraints(maxWidth: 640), builder: (_) => ListView(shrinkWrap: true, children: [
           ListTile(title: Text('Contoh Lab', style: TextStyle(color: kAcc))),
           ListTile(leading: const Icon(Icons.science), title: const Text('Lab 2 PC 1 Switch'), onTap: () { Navigator.pop(context); lab1(); }),
           ListTile(leading: const Icon(Icons.science), title: const Text('Lab 2 Jaringan 1 Router'), onTap: () { Navigator.pop(context); lab2(); }),
@@ -825,14 +919,14 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
           ListTile(title: Text('Projek tersimpan', style: TextStyle(color: kAcc))),
           for (final k in ks)
             ListTile(
-                title: Text(k.substring(2)), onTap: () { Navigator.pop(context); fromJ(jsonDecode(sp.getString(k)!)); },
+                title: Text(k.substring(2)), onTap: () { Navigator.pop(context); rec(); fromJ(jsonDecode(sp.getString(k)!)); },
                 trailing: IconButton(icon: const Icon(Icons.delete_outline), onPressed: () { sp.remove(k); Navigator.pop(context); })),
         ]));
   }
 
   String hint() => switch (tool) {
         Tool.select => 'Geser device / tap: setting IP atau ON-OFF sensor', Tool.hand => 'Geser canvas dengan 1 jari',
-        Tool.delete => 'Tap device untuk menghapus', Tool.inspect => 'Tap device untuk lihat config',
+        Tool.delete => eraseCable ? 'Hapus Kabel: tap garis kabel (perangkat tetap ada)' : 'Hapus Perangkat: tap device (kabelnya ikut terhapus)', Tool.inspect => 'Tap device untuk lihat config',
         Tool.note => 'Tap canvas untuk tambah catatan', Tool.ping => first == null ? 'Ping: pilih device asal' : 'Ping: pilih device tujuan',
         Tool.cable => first == null ? 'Kabel ${cbl[cable].$1}: pilih device pertama' : 'Pilih device kedua',
       };
@@ -842,6 +936,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
       left: d.pos.dx, top: d.pos.dy, width: 72,
       child: GestureDetector(
         onTap: () => tap(d), onLongPress: () => menu(d),
+        onPanStart: tool == Tool.select ? (_) => rec() : null,
         onPanUpdate: tool == Tool.select ? (u) => setState(() => d.pos += u.delta / ctrl.value.getMaxScaleOnAxis()) : null,
         child: Column(children: [
           Container(
@@ -852,14 +947,14 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
               child: Icon(icn(d), size: 32, color: iot(d.t) ? (d.t == T.iotGw ? kAcc : (d.on ? stateColor(d) : Colors.grey)) : (netDev(d.t) ? kAcc : kFg))),
           const SizedBox(height: 4),
           Text(d.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11)),
-          if (iot(d.t) && d.t != T.iotGw) Text(d.on ? 'ON' : 'OFF', style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: d.on ? stateColor(d) : Colors.grey)),
+          if (iot(d.t) && d.t != T.iotGw) Text(stateLabel(d), style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: d.on ? stateColor(d) : Colors.grey)),
         ]),
       ));
 
   Widget noteW(Note n) => Positioned(
       left: n.pos.dx, top: n.pos.dy,
       child: GestureDetector(
-          onLongPress: () => setState(() => notes.remove(n)),
+          onLongPress: () { rec(); setState(() => notes.remove(n)); },
           child: Container(
               padding: const EdgeInsets.all(8), constraints: const BoxConstraints(maxWidth: 200),
               decoration: BoxDecoration(color: const Color(0xFF3A3410), borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.amber)),
@@ -895,7 +990,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
             transformationController: ctrl, constrained: false, minScale: .2, maxScale: 3, panEnabled: tool == Tool.hand, boundaryMargin: const EdgeInsets.all(600),
             child: SizedBox(width: 6000, height: 6000, child: GestureDetector(
               behavior: HitTestBehavior.opaque,
-              onTapUp: (u) { if (tool == Tool.note) addNote(u.localPosition); },
+              onTapUp: (u) { if (tool == Tool.note) addNote(u.localPosition); if (tool == Tool.delete && eraseCable) eraseLinkAt(u.localPosition); },
               child: Stack(children: [
                 Positioned.fill(child: AnimatedBuilder(animation: an, builder: (_, __) => CustomPaint(painter: Pt(devs, links, run, an.value)))),
                 for (final n in notes) noteW(n),
@@ -908,7 +1003,19 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
               child: Row(mainAxisSize: MainAxisSize.min, children: [
                 for (final e in tools.entries)
                   IconButton(tooltip: e.key.name, color: tool == e.key ? kAcc : kFg2, icon: Icon(e.value), onPressed: () => setState(() { tool = e.key; first = null; })),
+                Container(width: 1, height: 24, color: kFg2),
+                IconButton(tooltip: 'Undo', icon: const Icon(Icons.undo), onPressed: undoSt.isEmpty ? null : undo),
+                IconButton(tooltip: 'Redo', icon: const Icon(Icons.redo), onPressed: redoSt.isEmpty ? null : redo),
               ])))),
+          if (tool == Tool.delete)
+            Positioned(top: 58, left: 0, right: 0, child: Center(child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(color: kCard.withAlpha(235), borderRadius: BorderRadius.circular(14)),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  ChoiceChip(label: const Text('Hapus Perangkat'), selected: !eraseCable, selectedColor: kAcc.withAlpha(90), onSelected: (_) => setState(() => eraseCable = false)),
+                  const SizedBox(width: 8),
+                  ChoiceChip(label: const Text('Hapus Kabel Saja'), selected: eraseCable, selectedColor: kAcc.withAlpha(90), onSelected: (_) => setState(() => eraseCable = true)),
+                ])))),
           Positioned(bottom: 8, left: 0, right: 0, child: Center(child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
               decoration: BoxDecoration(color: kCard.withAlpha(220), borderRadius: BorderRadius.circular(20)),
@@ -1005,11 +1112,18 @@ class _DevDlgState extends State<DevDialog> {
       mk = TextEditingController(text: d.mask), gw = TextEditingController(text: d.gw), cmd = TextEditingController(),
       pool = TextEditingController(text: d.pool), psz = TextEditingController(text: '${d.poolSize}'), dgw = TextEditingController(text: d.dgw);
   final sc = ScrollController(), fn = FocusNode();
-  String msg = '';
+  String msg = '', before = '';
+
+  @override
+  void dispose() {
+    widget.s.commit(before); // masuk riwayat undo kalau ada perubahan
+    super.dispose();
+  }
 
   @override
   void initState() {
     super.initState();
+    before = widget.s.snap();
     if (d.log.isEmpty) d.log.add(d.t == T.router ? 'Reyz Router CLI\nKetik: enable, conf t, interface g0/0, ip address <ip> <mask>, no shutdown, ip route <net> <mask> <next-hop>, do show ip route\n' : 'Reyz Command Prompt\nKetik: ping <ip>, ipconfig, ipconfig /renew, cls\n');
   }
 
@@ -1171,6 +1285,8 @@ class GuidePage extends StatelessWidget {
           'PC1 192.168.1.2 gateway 192.168.1.1, PC2 192.168.2.2 gateway 192.168.2.1. Lalu di router:\n'
           'enable\nconf t\ninterface g0/0\nip address 192.168.1.1 255.255.255.0\nno shutdown\nexit\n'
           'interface g0/1\nip address 192.168.2.1 255.255.255.0\nno shutdown\nend\ndo show ip route\n\n'
+          'UNDO / REDO & HAPUS\n\n'
+          'Tombol panah di toolbar atas canvas: Undo dan Redo (tambah/hapus perangkat, kabel, geser, rename, ubah IP). Tool Hapus punya 2 mode: Hapus Perangkat (kabel ikut terhapus) dan Hapus Kabel Saja (tap garis kabelnya, perangkat tetap ada).\n\n'
           'BERKAS & TEMPLATE\n\n'
           'Menu Berkas (kiri): Export projek jadi file .rts, Import file .rts, dan Export canvas ke gambar PNG. Menu Template: Basic LAN, Router to Router, Smart Home IoT, dan lab latihan.\n\n'
           'ROUTING STATIS\n\n'
@@ -1202,11 +1318,13 @@ class _IotState extends State<IotDialog> {
   Dev get d => widget.d;
   late final n = TextEditingController(text: d.name);
   late bool v = d.on;
+  late double tv = d.temp, th = d.thr;
 
   /// Terapkan perubahan (nama + status sensor), lalu hitung ulang semua Lampu/Alarm.
   void update() {
     if (n.text.trim().isNotEmpty) d.name = n.text.trim();
-    if (sensor(d.t)) d.on = v;
+    widget.s.rec();
+    if (d.t == T.tempSensor) { d.temp = tv; d.thr = th; d.on = tv >= th; } else if (sensor(d.t)) d.on = v;
     widget.s.propagate();
     widget.refresh();
     Navigator.pop(context);
@@ -1216,12 +1334,17 @@ class _IotState extends State<IotDialog> {
   Widget build(BuildContext context) {
     final conns = widget.s.links.where((l) => l.a == d.id || l.b == d.id).toList();
     return AlertDialog(
-      backgroundColor: kCard,
+      backgroundColor: kCard, surfaceTintColor: Colors.transparent,
       title: Text('Panel ${tInfo[d.t]!.$1}'),
       content: SizedBox(width: 380, child: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
         TextField(controller: n, decoration: const InputDecoration(labelText: 'Nama Device', border: OutlineInputBorder())),
         const SizedBox(height: 8),
-        if (sensor(d.t)) SwitchListTile(contentPadding: EdgeInsets.zero, title: Text(d.t == T.motion ? 'Gerakan terdeteksi' : 'Saklar'), subtitle: Text(v ? 'ON' : 'OFF'), value: v, onChanged: (x) => setState(() => v = x)),
+        if (d.t == T.tempSensor) ...[
+          Text('Suhu terbaca: ${tv.round()}°C'),
+          Slider(value: tv, min: 0, max: 60, divisions: 60, label: '${tv.round()}°C', onChanged: (x) => setState(() => tv = x)),
+          Text('Aktif jika suhu >= ${th.round()}°C'),
+          Slider(value: th, min: 0, max: 60, divisions: 60, label: '${th.round()}°C', onChanged: (x) => setState(() => th = x)),
+        ] else if (sensor(d.t)) SwitchListTile(contentPadding: EdgeInsets.zero, title: Text(d.t == T.motion ? 'Gerakan terdeteksi' : 'Saklar'), subtitle: Text(v ? 'ON' : 'OFF'), value: v, onChanged: (x) => setState(() => v = x)),
         if (actuator(d.t)) Text('Status: ${d.on ? 'ON (menyala)' : 'OFF (mati)'}\nOtomatis mengikuti sensor yang terhubung.'),
         if (d.t == T.iotGw) const Text('Gateway meneruskan sinyal sensor ke Lampu/Alarm.'),
         const SizedBox(height: 10),
@@ -1231,7 +1354,7 @@ class _IotState extends State<IotDialog> {
           ListTile(
               dense: true, contentPadding: EdgeInsets.zero, title: Text(widget.s.byId(l.a == d.id ? l.b : l.a).name),
               trailing: IconButton(icon: const Icon(Icons.link_off, color: Colors.redAccent), tooltip: 'Putus kabel', onPressed: () {
-                widget.s.links.remove(l); widget.s.propagate(); widget.refresh(); setState(() {});
+                widget.s.rec(); widget.s.links.remove(l); widget.s.propagate(); widget.refresh(); setState(() {});
               })),
       ]))),
       actions: [

@@ -11,7 +11,7 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-const kVersion = '1.4.0';
+const kVersion = '1.5.0';
 const kBuild = int.fromEnvironment('BUILD', defaultValue: 0); // nomor build (diisi otomatis oleh GitHub Actions)
 
 // Tema: 0 = Biru Dongker (default), 1 = Hitam, 2 = Putih
@@ -114,7 +114,7 @@ int pre(String mk) {
 class Iface { String ip = '', mask = '255.255.255.0'; bool up = false; }
 
 /// Satu port FastEthernet pada switch: status admin (Up/Down) dan VLAN akses.
-class SwPort { bool up = true; int vlan = 1; }
+class SwPort { bool up = true, trunk = false; int vlan = 1; } // trunk = membawa semua VLAN; vlan = VLAN akses
 
 /// Data satu device di canvas.
 class Dev {
@@ -123,6 +123,8 @@ class Dev {
   final Map<String, Iface> ifs = {};
   final List<List<String>> routes = []; // rute statis router: [network, mask, next-hop]
   final List<SwPort> ports = []; // 24 port switch (Fa0/1 - Fa0/24)
+  final Map<int, String> vlans = {1: 'default'}; // database VLAN switch: id -> nama
+  final Map<String, String> arp = {}; // tabel ARP: IP -> MAC (tidak disimpan ke file)
   String dns = ''; // DNS server
   bool wifi = false; double range = 200; // Wi-Fi: memancar atau tidak (AP selalu), radius sinyal dalam px
   final List<String> log = [];
@@ -136,7 +138,7 @@ class Dev {
     if (t == T.sw) for (var i = 0; i < 24; i++) ports.add(SwPort());
     if (t == T.ap) wifi = true;
   }
-  Map toJ() => {'id': id, 't': t.index, 'n': name, 'x': pos.dx, 'y': pos.dy, 'ip': ip, 'mk': mask, 'gw': gw, 'on': on, 'dh': dhcp, 'ud': useDhcp, 'pl': pool, 'ps': poolSize, 'dg': dgw, 'rt': routes, 'tp': temp, 'th': thr, 'dn': dns, 'wf': wifi, 'rg': range, 'sp': t == T.sw ? ports.map((p) => [p.up ? 1 : 0, p.vlan]).toList() : null,
+  Map toJ() => {'id': id, 't': t.index, 'n': name, 'x': pos.dx, 'y': pos.dy, 'ip': ip, 'mk': mask, 'gw': gw, 'on': on, 'dh': dhcp, 'ud': useDhcp, 'pl': pool, 'ps': poolSize, 'dg': dgw, 'rt': routes, 'tp': temp, 'th': thr, 'dn': dns, 'wf': wifi, 'rg': range, 'sp': t == T.sw ? ports.map((p) => [p.up ? 1 : 0, p.vlan, p.trunk ? 1 : 0]).toList() : null, 'vl': t == T.sw ? vlans.map((k, v) => MapEntry('$k', v)) : null,
         'ifs': ifs.map((k, v) => MapEntry(k, [v.ip, v.mask, v.up]))};
   static Dev fromJ(Map j) {
     final d = Dev(j['id'], T.values[j['t']], j['n'], Offset(j['x'], j['y']))..ip = j['ip']..mask = j['mk']..gw = j['gw']..on = j['on'] ?? false..dhcp = j['dh'] ?? false..useDhcp = j['ud'] ?? false..pool = j['pl'] ?? '192.168.1.100'..poolSize = j['ps'] ?? 50..dgw = j['dg'] ?? ''..temp = (j['tp'] ?? 25).toDouble()..thr = (j['th'] ?? 30).toDouble();
@@ -146,19 +148,38 @@ class Dev {
     d.wifi = j['wf'] ?? d.t == T.ap;
     d.range = (j['rg'] ?? 200).toDouble();
     final sp = j['sp'];
-    if (sp is List) for (var i = 0; i < sp.length && i < d.ports.length; i++) { d.ports[i].up = sp[i][0] == 1; d.ports[i].vlan = sp[i][1]; }
+    if (sp is List) for (var i = 0; i < sp.length && i < d.ports.length; i++) { d.ports[i].up = sp[i][0] == 1; d.ports[i].vlan = sp[i][1]; d.ports[i].trunk = sp[i].length > 2 && sp[i][2] == 1; }
+    final vl = j['vl'];
+    if (vl is Map) { d.vlans.clear(); vl.forEach((k, v) => d.vlans[int.parse('$k')] = '$v'); d.vlans.putIfAbsent(1, () => 'default'); }
     return d;
   }
 }
 
 class Link { int a, b, c, pa = 0, pb = 0; Link(this.a, this.b, this.c); } // c = jenis kabel (0-4); pa/pb = nomor port switch di ujung a/b (0 = bukan switch)
 class Note { Offset pos; String text; Note(this.pos, this.text); }
+/// Satu baris Event List: riwayat lalu lintas paket (Source, Destination, Protokol, Status).
+class Ev {
+  final int n; final String time, src, dst, proto, info;
+  String status; // Berjalan / Success / Failed / Dibatalkan
+  Ev(this.n, this.time, this.src, this.dst, this.proto, this.status, [this.info = '']);
+}
+
 /// Hasil ping / paket yang dianimasikan. phases: urutan paket (ARP lalu ICMP, atau DHCP).
 class PR {
   bool ok; String msg; List<int> path;
-  String proto = 'ICMP'; List<String> phases = ['ICMP'];
+  String proto = 'ICMP'; List<String> phases = ['ICMP']; List<Ev> evs = [];
   String sIp = '', dIp = ''; int sId = -1, dId = -1, arpLen = 2; // arpLen = jumlah node yang dilewati ARP (sampai router/host pertama)
   PR(this.ok, this.msg, this.path);
+}
+
+/// Satu perintah CLI IOS: mode yang boleh, pola kata, bantuan, dan handler. Argumen <...> dikirim ke handler lewat list `a`.
+class CliCmd {
+  final Set<int> modes; // 0 User, 1 Privileged, 2 Global Config, 3 Interface Config, 4 VLAN Config
+  final String pattern, help;
+  final Set<T>? only; // khusus tipe device tertentu (null = router & switch)
+  final String Function(Dev d, List<String> a) run;
+  late final List<String> words = pattern.split(' ');
+  CliCmd(this.modes, this.pattern, this.help, this.run, {this.only});
 }
 
 /// Satu soal Lab Challenge: skenario jaringan bermasalah + pasangan (id sumber, id tujuan) yang harus berhasil di-ping.
@@ -289,10 +310,12 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
     super.dispose();
   }
 
-  /// Animasi paket selesai: catat ARP, bersihkan paket, tampilkan hasil.
+  /// Animasi paket selesai (Mode Simulasi): tandai event sukses, pelajari ARP, tampilkan hasil.
   void onPktDone(AnimationStatus st) {
     final r = run;
     if (st != AnimationStatus.completed || r == null) return;
+    for (final e in r.evs) { e.status = 'Success'; }
+    learnArp(r);
     if (r.proto == 'ICMP') arped.add('${r.sId}>${r.dId}');
     setState(() => run = null);
     toast(true, r.msg);
@@ -357,12 +380,13 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
         var nv = vl;
         if (du.t == T.sw && u != a) { // keluar lewat port switch u
           final pe = portAt(du, l);
-          if (pe == null || !pe.up || pe.vlan != vl) continue;
+          if (pe == null || !pe.up || (!pe.trunk && pe.vlan != vl)) continue; // trunk membawa semua VLAN
         }
         if (dv.t == T.sw) { // masuk lewat port switch v
           final pi = portAt(dv, l);
-          if (pi == null || !pi.up || (vl != 0 && pi.vlan != vl)) continue;
-          nv = pi.vlan;
+          if (pi == null || !pi.up) continue;
+          if (pi.trunk) { nv = vl == 0 ? 1 : vl; } // trunk: VLAN terbawa (native VLAN 1)
+          else { if (vl != 0 && pi.vlan != vl) continue; nv = pi.vlan; } // access: VLAN ditentukan port
         }
         final nk = (v, nv);
         if (!prev.containsKey(nk)) { prev[nk] = cur; q.add(nk); }
@@ -427,12 +451,18 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
       final f = u.where((x) => same(x.ip, dst, x.mask)).firstOrNull ?? u.firstOrNull;
       ip = f?.ip ?? ''; mk = f?.mask ?? '255.255.255.0'; gw = '';
     }
-    return ping(s, ip, mk, gw, dst);
+    final r = ping(s, ip, mk, gw, dst);
+    r.sId = s.id;
+    r.dId = devs.where((e) => e.ip == dst || e.ifs.values.any((i) => i.ip == dst)).firstOrNull?.id ?? -1;
+    if (r.sIp.isEmpty) r.sIp = ip;
+    if (r.dIp.isEmpty) r.dIp = dst;
+    return r;
   }
 
   /// Teks output ping ala Command Prompt.
   String pingOut(Dev s, String dst) {
     final r = pingDev(s, dst);
+    instant(r, toastIt: false); // catat ke Event List
     final h = 'Pinging $dst with 32 bytes of data:\n';
     if (r.ok) return '$h${List.filled(4, 'Reply from $dst: bytes=32 time<1ms TTL=128').join('\n')}\n\nPing statistics: Sent=4, Received=4, Lost=0 (0% loss)';
     return '$h${List.filled(4, 'Request timed out.').join('\n')}\n\nPing statistics: Sent=4, Received=0, Lost=4 (100% loss)\n[Petunjuk] ${r.msg}';
@@ -440,9 +470,9 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
 
   /// Prompt CLI sesuai mode.
   String prompt(Dev d) {
-    if (d.t != T.router) return 'C:\\> ';
+    if (d.t != T.router && d.t != T.sw) return 'C:\\> ';
     final n = d.name.replaceAll(' ', '');
-    return ['$n>', '$n#', '$n(config)#', '$n(config-if)#'][d.mode] + ' ';
+    return ['$n>', '$n#', '$n(config)#', '$n(config-if)#', '$n(config-vlan)#'][d.mode] + ' ';
   }
 
   /// Output tabel rute (hanya rute connected).
@@ -455,79 +485,315 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
     return r.isEmpty ? '(Belum ada rute. Atur ip address lalu no shutdown)' : 'Codes: C - connected, S - static\n\n${r.join('\n')}';
   }
 
-  /// Menjalankan perintah CLI (PC = Command Prompt, Router = CLI palsu).
-  String cli(Dev d, String raw) {
-    if (raw.trim().isEmpty) return '';
-    var w = raw.trim().toLowerCase().split(RegExp(r'\s+'));
-    if (d.t != T.router) {
-      if (w[0] == 'ping') return w.length < 2 ? 'Pemakaian: ping <ip>' : pingOut(d, w[1]);
-      if (w[0] == 'ipconfig') {
+  // ===================== CISCO IOS CLI (modular) =====================
+  // Cara menambah perintah baru: tambahkan SATU baris c({mode}, 'pola', 'bantuan', (d, a) => ...) di _buildCmds().
+  // Pola: kata biasa = keyword (boleh disingkat, mis. "conf t"), <nama> = argumen bebas yang dikirim ke handler lewat list `a`.
+  // Mode: 0 User EXEC (>), 1 Privileged EXEC (#), 2 Global Config, 3 Interface Config, 4 VLAN Config.
+
+  /// Tabel perintah IOS (dibuat sekali).
+  late final List<CliCmd> iosCmds = _buildCmds();
+
+  List<CliCmd> _buildCmds() {
+    CliCmd c(Set<int> m, String p, String h, String Function(Dev, List<String>) f, {Set<T>? only}) => CliCmd(m, p, h, f, only: only);
+    const rt = {T.router}, sw = {T.sw};
+    return [
+      c({0, 1, 2, 3, 4}, 'help', 'Daftar perintah di mode ini', (d, a) => helpText(d)),
+      c({0}, 'enable', 'Masuk ke Privileged EXEC', (d, a) { d.mode = 1; return ''; }),
+      c({1}, 'disable', 'Kembali ke User EXEC', (d, a) { d.mode = 0; return ''; }),
+      c({0, 1, 2, 3, 4}, 'exit', 'Keluar dari mode ini', (d, a) { d.mode = const [0, 0, 1, 2, 2][d.mode]; return ''; }),
+      c({2, 3, 4}, 'end', 'Kembali ke Privileged EXEC', (d, a) { d.mode = 1; return ''; }),
+      c({0, 1}, 'ping <ip>', 'Kirim echo ICMP', (d, a) => pingOut(d, a[0])),
+      c({1}, 'configure terminal', 'Masuk ke Global Configuration', (d, a) { d.mode = 2; return 'Enter configuration commands, one per line.  End with CNTL/Z.'; }),
+      c({1}, 'show running-config', 'Konfigurasi yang sedang berjalan', (d, a) => runCfg(d)),
+      c({1}, 'show ip interface brief', 'Ringkasan IP dan status interface', (d, a) => ipBrief(d)),
+      c({1}, 'show ip route', 'Tabel routing', (d, a) => routes(d), only: rt),
+      c({1}, 'show vlan brief', 'Daftar VLAN dan port-nya', (d, a) => vlanBrief(d), only: sw),
+      c({1}, 'show interfaces trunk', 'Daftar port trunk', (d, a) => trunkInfo(d), only: sw),
+      c({1}, 'show arp', 'Tabel ARP', (d, a) => arpText(d)),
+      c({1}, 'write memory', 'Simpan konfigurasi', (d, a) => 'Building configuration...\n[OK]'),
+      c({2, 3, 4}, 'hostname <name>', 'Ganti nama host', (d, a) { d.name = a[0]; return ''; }),
+      c({2, 3}, 'interface <name>', 'Pilih interface (mis. g0/0 atau fa0/1)', (d, a) => selIf(d, a[0])),
+      c({2, 3}, 'interface <type> <num>', 'Pilih interface (mis. fastethernet 0/1)', (d, a) => selIf(d, a[0] + a[1])),
+      c({2, 3}, 'ip route <dest> <mask> <next-hop>', 'Tambah rute statis', (d, a) => addRoute(d, a), only: rt),
+      c({2, 3}, 'no ip route <dest> <mask>', 'Hapus rute statis', (d, a) { d.routes.removeWhere((x) => x[0] == a[0] && x[1] == a[1]); return ''; }, only: rt),
+      c({2, 3}, 'vlan <id>', 'Buat / pilih VLAN', (d, a) => vlanSel(d, a[0]), only: sw),
+      c({2, 3}, 'no vlan <id>', 'Hapus VLAN', (d, a) => vlanDel(d, a[0]), only: sw),
+      c({3}, 'ip address <ip> <mask>', 'Atur IP address interface', (d, a) => setIp(d, a), only: rt),
+      c({3}, 'no ip address', 'Hapus IP address interface', (d, a) { d.ifs[d.cur]!.ip = ''; return ''; }, only: rt),
+      c({3}, 'no shutdown', 'Aktifkan interface', (d, a) => setUp(d, true)),
+      c({3}, 'shutdown', 'Matikan interface', (d, a) => setUp(d, false)),
+      c({3}, 'switchport mode access', 'Port mode access (satu VLAN)', (d, a) { d.ports[int.parse(d.cur) - 1].trunk = false; return ''; }, only: sw),
+      c({3}, 'switchport mode trunk', 'Port mode trunk (membawa semua VLAN)', (d, a) { d.ports[int.parse(d.cur) - 1].trunk = true; return ''; }, only: sw),
+      c({3}, 'switchport access vlan <id>', 'Tetapkan VLAN pada port access', (d, a) => accessVlan(d, a[0]), only: sw),
+      c({4}, 'name <vlan-name>', 'Beri nama VLAN', (d, a) { d.vlans[int.parse(d.cur)] = a[0]; return ''; }, only: sw),
+    ];
+  }
+
+  /// Apakah kata pola `w` cocok dengan token `tok`? Argumen <...> menerima apa saja; keyword boleh disingkat.
+  bool _m(String w, String tok) => w.startsWith('<') || w.startsWith(tok);
+
+  /// Perintah yang cocok dengan token `t` pada mode `mode` (keyword persis lebih diutamakan daripada singkatan).
+  List<CliCmd> _match(Dev d, int mode, List<String> t) {
+    var c = iosCmds.where((x) => x.modes.contains(mode) && (x.only == null || x.only!.contains(d.t))).toList();
+    for (var i = 0; i < t.length; i++) {
+      final n = c.where((x) => i < x.words.length && _m(x.words[i], t[i])).toList();
+      final ex = n.where((x) => x.words[i] == t[i]).toList();
+      c = ex.isNotEmpty ? ex : n;
+    }
+    return c;
+  }
+
+  /// PARSER UTAMA: pecah token, cocokkan ke tabel, jalankan handler, atau beri pesan error ala IOS.
+  String ios(Dev d, String raw) {
+    final ot = raw.trim().split(RegExp(r'\s+')), tl = ot.map((e) => e.toLowerCase()).toList();
+    var mode = d.mode, toks = tl, otk = ot;
+    if (tl[0] == 'do' && mode >= 2) { // "do" = jalankan perintah EXEC dari mode config
+      if (tl.length < 2) return '% Incomplete command.';
+      mode = 1; toks = tl.sublist(1); otk = ot.sublist(1);
+    }
+    final ms = _match(d, mode, toks);
+    if (ms.isEmpty) return "% Invalid input detected at '^' marker.";
+    final full = ms.where((x) => x.words.length == toks.length).toList();
+    if (full.isEmpty) return '% Incomplete command.';
+    if (full.length > 1) return '% Ambiguous command: "${raw.trim()}"';
+    final cmd = full.first;
+    return cmd.run(d, [for (var i = 0; i < cmd.words.length; i++) if (cmd.words[i].startsWith('<')) otk[i]]);
+  }
+
+  /// Teks bantuan lengkap untuk mode saat ini.
+  String helpText(Dev d) {
+    final cs = iosCmds.where((x) => x.modes.contains(d.mode) && (x.only == null || x.only!.contains(d.t)));
+    return 'Perintah di mode ini (ketik ? untuk bantuan sintaks, Tab untuk melengkapi):\n${[for (final c in cs) '  ${c.pattern.padRight(36)}${c.help}'].join('\n')}';
+  }
+
+  /// BANTUAN SINTAKS (tombol ?): tanpa spasi di akhir = kata yang diawali teks itu, dengan spasi = pilihan kata berikutnya.
+  String qhelp(Dev d, String text) {
+    if (d.t != T.router && d.t != T.sw) return 'Perintah: ping <ip>, ipconfig [/all|/renew|/release], traceroute <ip>, arp -a, cls';
+    var mode = d.mode;
+    final endsSpace = text.isEmpty || text.endsWith(' ');
+    var tl = text.trim().toLowerCase().split(RegExp(r'\s+')).where((e) => e.isNotEmpty).toList();
+    if (tl.isNotEmpty && tl[0] == 'do' && mode >= 2 && (tl.length > 1 || endsSpace)) { mode = 1; tl = tl.sublist(1); }
+    final done = endsSpace ? tl : tl.sublist(0, tl.length - 1), part = endsSpace || tl.isEmpty ? '' : tl.last;
+    final cs = _match(d, mode, done);
+    final out = <String, String>{};
+    for (final x in cs) {
+      if (x.words.length <= done.length) continue;
+      final w = x.words[done.length];
+      if (w.startsWith('<') ? part.isEmpty : w.startsWith(part)) out.putIfAbsent(w, () => x.help);
+    }
+    if (part.isEmpty && cs.any((x) => x.words.length == done.length) && done.isNotEmpty) out['<cr>'] = 'Jalankan perintah';
+    if (out.isEmpty) return '% Unrecognized command';
+    return [for (final e in out.entries) '  ${e.key.padRight(20)}${e.value}'].join('\n');
+  }
+
+  /// AUTOCOMPLETE (Tab): lengkapi kata terakhir; kalau ada beberapa pilihan, lengkapi sampai awalan bersama.
+  String complete(Dev d, String text) {
+    if ((d.t != T.router && d.t != T.sw) || text.trim().isEmpty || text.endsWith(' ')) return text;
+    var mode = d.mode;
+    final ot = text.trim().split(RegExp(r'\s+'));
+    var tl = ot.map((e) => e.toLowerCase()).toList();
+    if (tl[0] == 'do' && mode >= 2 && tl.length > 1) { mode = 1; tl = tl.sublist(1); }
+    final done = tl.sublist(0, tl.length - 1), part = tl.last;
+    final opts = <String>{
+      for (final x in _match(d, mode, done))
+        if (x.words.length > done.length && !x.words[done.length].startsWith('<') && x.words[done.length].startsWith(part)) x.words[done.length]
+    };
+    if (opts.isEmpty) return text;
+    var pre = opts.first;
+    for (final o in opts) { while (!o.startsWith(pre)) pre = pre.substring(0, pre.length - 1); }
+    final base = ot.sublist(0, ot.length - 1).join(' ');
+    final w = opts.length == 1 ? '$pre ' : pre;
+    return base.isEmpty ? w : '$base $w';
+  }
+
+  // ----- handler perintah IOS -----
+  String ifName(Dev d) => d.t == T.router ? 'GigabitEthernet${d.cur.substring(1)}' : 'FastEthernet0/${d.cur}';
+
+  /// interface <nama>: router = g0/0 atau g0/1, switch = fa0/1 sampai fa0/24.
+  String selIf(Dev d, String name) {
+    final low = name.toLowerCase();
+    if (d.t == T.router) {
+      final m = RegExp(r'(\d+/\d+)$').firstMatch(low);
+      final k = m == null ? '' : 'g${m.group(1)}';
+      if (!d.ifs.containsKey(k)) return '% Interface tidak ada. Pakai GigabitEthernet0/0 atau GigabitEthernet0/1';
+      d.cur = k;
+    } else {
+      final m = RegExp(r'^f\w*?0/(\d+)$').firstMatch(low);
+      final p = int.tryParse(m?.group(1) ?? '') ?? 0;
+      if (p < 1 || p > d.ports.length) return '% Interface tidak ada. Pakai FastEthernet0/1 sampai 0/24';
+      d.cur = '$p';
+    }
+    d.mode = 3;
+    return '';
+  }
+
+  String addRoute(Dev d, List<String> a) {
+    if (ipn(a[0]) == null || ipn(a[1]) == null || ipn(a[2]) == null) return '% Format IP / mask salah. Contoh: ip route 192.168.2.0 255.255.255.0 10.0.0.2';
+    d.routes..removeWhere((x) => x[0] == a[0] && x[1] == a[1])..add([a[0], a[1], a[2]]);
+    return '';
+  }
+
+  String setIp(Dev d, List<String> a) {
+    if (ipn(a[0]) == null || ipn(a[1]) == null || maskErr(a[1]) != null) return '% Format IP atau subnet mask salah';
+    d.ifs[d.cur]!..ip = a[0]..mask = a[1];
+    return '';
+  }
+
+  String setUp(Dev d, bool up) {
+    if (d.t == T.router) { d.ifs[d.cur]!.up = up; } else { d.ports[int.parse(d.cur) - 1].up = up; }
+    return '%LINK-5-CHANGED: Interface ${ifName(d)}, changed state to ${up ? 'up' : 'administratively down'}';
+  }
+
+  /// Pastikan VLAN `id` ada di database VLAN switch (dipakai saat VLAN ditetapkan dari GUI).
+  void vlanCreate(Dev d, int id) => d.vlans.putIfAbsent(id, () => vlanName(id));
+
+  String vlanName(int id) => 'VLAN${id.toString().padLeft(4, '0')}';
+
+  String vlanSel(Dev d, String s) {
+    final id = int.tryParse(s);
+    if (id == null || id < 1 || id > 4094) return '% VLAN tidak valid (1-4094)';
+    d.vlans.putIfAbsent(id, () => vlanName(id));
+    d.cur = '$id';
+    d.mode = 4;
+    return '';
+  }
+
+  String vlanDel(Dev d, String s) {
+    final id = int.tryParse(s);
+    if (id == null || !d.vlans.containsKey(id)) return '% VLAN tidak ada';
+    if (id == 1) return '% Default VLAN 1 may not be deleted.';
+    d.vlans.remove(id);
+    return '';
+  }
+
+  String accessVlan(Dev d, String s) {
+    final id = int.tryParse(s);
+    if (id == null || id < 1 || id > 4094) return '% VLAN tidak valid (1-4094)';
+    final created = !d.vlans.containsKey(id);
+    if (created) d.vlans[id] = vlanName(id);
+    d.ports[int.parse(d.cur) - 1].vlan = id;
+    return created ? '% Access VLAN does not exist. Creating vlan $id' : '';
+  }
+
+  String ipBrief(Dev d) {
+    final b = StringBuffer('Interface              IP-Address      OK? Method Status                Protocol');
+    void row(String name, String ip, bool up) {
+      final c1 = name.padRight(23), c2 = (ip.isEmpty ? 'unassigned' : ip).padRight(16), c3 = ip.isEmpty ? 'unset  ' : 'manual ';
+      final c4 = (up ? 'up' : 'administratively down').padRight(22);
+      b.write('\n${c1}${c2}YES $c3$c4${up ? 'up' : 'down'}');
+    }
+    if (d.t == T.router) {
+      d.ifs.forEach((k, f) => row('GigabitEthernet${k.substring(1)}', f.ip, f.up));
+    } else {
+      for (var i = 0; i < d.ports.length; i++) row('FastEthernet0/${i + 1}', '', d.ports[i].up);
+    }
+    return b.toString();
+  }
+
+  String runCfg(Dev d) {
+    final b = StringBuffer('Building configuration...\n\nCurrent configuration:\n!\nhostname ${d.name.replaceAll(' ', '')}\n!\n');
+    if (d.t == T.router) {
+      d.ifs.forEach((k, f) {
+        b.write('interface GigabitEthernet${k.substring(1)}\n');
+        b.write(f.ip.isEmpty ? ' no ip address\n' : ' ip address ${f.ip} ${f.mask}\n');
+        b.write(f.up ? ' no shutdown\n!\n' : ' shutdown\n!\n');
+      });
+      for (final r in d.routes) { b.write('ip route ${r[0]} ${r[1]} ${r[2]}\n'); }
+      if (d.routes.isNotEmpty) b.write('!\n');
+    } else {
+      d.vlans.forEach((id, nm) { if (id != 1) b.write('vlan $id\n name $nm\n!\n'); });
+      for (var i = 0; i < d.ports.length; i++) {
+        final p = d.ports[i];
+        b.write('interface FastEthernet0/${i + 1}\n');
+        if (p.trunk) { b.write(' switchport mode trunk\n'); } else if (p.vlan != 1) { b.write(' switchport access vlan ${p.vlan}\n switchport mode access\n'); }
+        if (!p.up) b.write(' shutdown\n');
+        b.write('!\n');
+      }
+    }
+    b.write('end');
+    return b.toString();
+  }
+
+  String vlanBrief(Dev d) {
+    final b = StringBuffer('VLAN Name                             Status    Ports\n---- -------------------------------- --------- -------------------------------');
+    final ids = d.vlans.keys.toList()..sort();
+    for (final id in ids) {
+      final ps = [for (var i = 0; i < d.ports.length; i++) if (!d.ports[i].trunk && d.ports[i].vlan == id) 'Fa0/${i + 1}'];
+      final c1 = '$id'.padRight(5), c2 = d.vlans[id]!.padRight(33), c3 = 'active'.padRight(10);
+      b.write('\n$c1$c2$c3${ps.join(', ')}');
+    }
+    return b.toString();
+  }
+
+  String trunkInfo(Dev d) {
+    final t = [for (var i = 0; i < d.ports.length; i++) if (d.ports[i].trunk) 'Fa0/${i + 1}'];
+    if (t.isEmpty) return '(Tidak ada port trunk)';
+    return 'Port        Mode         Encapsulation  Status        Native vlan\n${t.map((p) => '${p.padRight(11)} on           802.1q         trunking      1').join('\n')}';
+  }
+
+  String arpText(Dev d) {
+    if (d.arp.isEmpty) return 'Tidak ada entri ARP. (Lakukan ping dulu supaya ARP terisi.)';
+    return 'Protocol  Address          Hardware Addr    Type\n${[for (final e in d.arp.entries) 'Internet  ${e.key.padRight(17)}${e.value.replaceAll(':', '.').toLowerCase().padRight(17)}ARPA'].join('\n')}';
+  }
+
+  // ===================== COMMAND PROMPT (PC / Laptop / Server dll) =====================
+  /// traceroute: tampilkan hop Layer 3 (router lalu tujuan) dari jalur ping.
+  String traceOut(Dev s, String dst) {
+    final r = pingDev(s, dst);
+    instant(r, toastIt: false);
+    final h = 'Tracing route to $dst over a maximum of 30 hops:\n\n';
+    if (!r.ok) return '$h  1     *        *        *     Request timed out.\n\nTrace failed. [Petunjuk] ${r.msg}';
+    final hops = <String>[];
+    var prev = dev(r.path.first)!;
+    for (var i = 1; i < r.path.length; i++) {
+      final n = dev(r.path[i])!;
+      if (passive(n.t)) continue;
+      hops.add(ipFacing(n, prev));
+      prev = n;
+    }
+    return '$h${[for (var i = 0; i < hops.length; i++) '  ${i + 1}     <1 ms    <1 ms    <1 ms   ${hops[i]}'].join('\n')}\n\nTrace complete.';
+  }
+
+  /// arp -a: tabel ARP perangkat.
+  String arpWin(Dev d) {
+    if (d.arp.isEmpty) return 'No ARP Entries Found.';
+    return 'Interface: ${d.ip} --- 0x1\n  Internet Address      Physical Address      Type\n${[for (final e in d.arp.entries) '  ${e.key.padRight(22)}${e.value.replaceAll(':', '-').toLowerCase().padRight(22)}dynamic'].join('\n')}';
+  }
+
+  String winCli(Dev d, String raw) {
+    final w = raw.trim().toLowerCase().split(RegExp(r'\s+'));
+    switch (w[0]) {
+      case 'ping':
+        return w.length < 2 ? 'Pemakaian: ping <ip>' : pingOut(d, w[1]);
+      case 'tracert':
+      case 'traceroute':
+        return w.length < 2 ? 'Pemakaian: traceroute <ip>' : traceOut(d, w[1]);
+      case 'arp':
+        return w.length > 1 && w[1] == '-a' ? arpWin(d) : 'Pemakaian: arp -a';
+      case 'ipconfig':
         if (w.length > 1 && w[1] == '/release') { d.ip = ''; d.gw = ''; return 'IP Address dilepas.'; }
         if (w.length > 1 && w[1] == '/renew') {
           d.useDhcp = true;
           final r = dhcpRequest(d);
           return r == null ? 'DHCP gagal: tidak ada server DHCP aktif yang terhubung' : 'DHCP berhasil. IP baru: $r';
         }
-        return 'DHCP . . . . . . . . : ${d.useDhcp ? 'Aktif' : 'Tidak'}\nIPv4 Address. . . . : ${d.ip}\nSubnet Mask . . . . : ${d.mask}\nDefault Gateway . . : ${d.gw}\nDNS Server. . . . . : ${d.dns}';
-      }
-      if (w[0] == 'cls') return '\u0000';
-      return 'Perintah tidak dikenal. Coba: ping, ipconfig, ipconfig /renew, ipconfig /release, cls';
-    }
-    var m = d.mode;
-    const bad = '% Perintah salah atau belum di mode yang benar';
-    if (w[0] == 'do') {
-      if (m < 2 || w.length < 2) return bad;
-      w = w.sublist(1); m = 1;
-    }
-    switch (w[0]) {
-      case 'enable':
-        if (m == 0) { d.mode = 1; return ''; }
-        return bad;
-      case 'exit':
-        d.mode = d.mode > 0 ? d.mode - 1 : 0; return '';
-      case 'end':
-        if (d.mode >= 2) d.mode = 1;
-        return '';
-      case 'conf':
-        if (m == 1) { d.mode = 2; return 'Enter configuration commands, one per line. End with CNTL/Z.'; }
-        return bad;
-      case 'hostname':
-        if (m >= 2 && w.length > 1) { d.name = raw.trim().split(RegExp(r'\s+'))[1]; return ''; }
-        return bad;
-      case 'interface':
-      case 'int':
-        {
-          if (m < 2 || w.length < 2) return bad;
-          final mt = RegExp(r'(\d+/\d+)$').firstMatch(w.sublist(1).join(''));
-          final k = mt == null ? '' : 'g${mt.group(1)}';
-          if (!d.ifs.containsKey(k)) return '% Interface tidak ada. Pakai g0/0 atau g0/1';
-          d.cur = k; d.mode = 3; return '';
+        if (w.length > 1 && w[1] == '/all') {
+          return 'Physical Address. . . . . . . . . : ${mac(d).replaceAll(':', '-')}\nDHCP Enabled. . . . . . . . . . . : ${d.useDhcp ? 'Yes' : 'No'}\nIPv4 Address. . . . . . . . . . . : ${d.ip}\nSubnet Mask . . . . . . . . . . . : ${d.mask}\nDefault Gateway . . . . . . . . . : ${d.gw}\nDNS Servers . . . . . . . . . . . : ${d.dns}';
         }
-      case 'ip':
-        {
-          if (m >= 2 && w.length >= 5 && w[1] == 'route') { // ip route <network> <mask> <next-hop>
-            if (ipn(w[2]) == null || ipn(w[3]) == null || ipn(w[4]) == null) return '% Format salah. Contoh: ip route 192.168.2.0 255.255.255.0 10.0.0.2';
-            d.routes..removeWhere((x) => x[0] == w[2] && x[1] == w[3])..add([w[2], w[3], w[4]]);
-            return '';
-          }
-          if (m != 3 || w.length < 4 || w[1] != 'address') return bad;
-          if (ipn(w[2]) == null || ipn(w[3]) == null) return '% Format IP atau subnet mask salah';
-          d.ifs[d.cur]!..ip = w[2]..mask = w[3];
-          return '';
-        }
-      case 'no':
-        if (m == 3 && w.length > 1 && w[1] == 'shutdown') { d.ifs[d.cur]!.up = true; return '%LINK-5-CHANGED: Interface ${d.cur}, changed state to up'; }
-        return bad;
-      case 'shutdown':
-        if (m == 3) { d.ifs[d.cur]!.up = false; return '%LINK-5-CHANGED: Interface ${d.cur}, changed state to administratively down'; }
-        return bad;
-      case 'ping':
-        return m >= 1 && w.length > 1 ? pingOut(d, w[1]) : bad;
-      case 'show':
-        if (m >= 1 && w.length >= 3 && w[1] == 'ip' && w[2] == 'route') return routes(d);
-        return bad;
+        return 'IPv4 Address. . . . . . . . . . . : ${d.ip}\nSubnet Mask . . . . . . . . . . . : ${d.mask}\nDefault Gateway . . . . . . . . . : ${d.gw}';
+      case 'cls':
+        return '\u0000';
+      case 'help':
+      case '?':
+        return qhelp(d, '');
     }
-    return bad;
+    return 'Perintah tidak dikenal. Ketik help untuk daftar perintah.';
+  }
+
+  /// Menjalankan satu baris perintah: router/switch = CLI Cisco IOS, device lain = Command Prompt.
+  String cli(Dev d, String raw) {
+    if (raw.trim().isEmpty) return '';
+    return d.t == T.router || d.t == T.sw ? ios(d, raw) : winCli(d, raw);
   }
 
   /// Tampilkan notifikasi hijau (sukses) / merah (gagal).
@@ -535,16 +801,85 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
     ..hideCurrentSnackBar()
     ..showSnackBar(SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating, backgroundColor: ok ? Colors.green.shade700 : Colors.red.shade700));
 
-  /// Jalankan paket (ping / DHCP) dengan animasi; ping pertama didahului ARP. Hasil muncul di onPktDone.
+  // ===================== MODE REALTIME vs SIMULASI + EVENT LIST =====================
+  final events = <Ev>[]; // riwayat lalu lintas paket
+  int evN = 0;
+  bool simMode = true, evOpen = true; // simMode: true = Simulasi (animasi, pause, step), false = Realtime (instan)
+
+  /// Tambah satu baris ke Event List.
+  Ev logEv(String src, String dst, String proto, String status, [String info = '']) {
+    final n = DateTime.now();
+    String t2(int v) => v.toString().padLeft(2, '0');
+    final e = Ev(++evN, '${t2(n.hour)}:${t2(n.minute)}:${t2(n.second)}', src, dst, proto, status, info);
+    events.add(e);
+    if (events.length > 300) events.removeAt(0);
+    return e;
+  }
+
+  /// Simpan alamat MAC tetangga Layer 3 pertama ke tabel ARP pengirim (dan sebaliknya).
+  void learnArp(PR r) {
+    if (r.proto != 'ICMP' || r.path.length < 2) return;
+    var k = 1;
+    while (k < r.path.length - 1 && passive(byId(r.path[k]).t)) k++;
+    final s = dev(r.path.first), n = dev(r.path[k]);
+    if (s == null || n == null) return;
+    s.arp[ipFacing(n, s)] = mac(n, ifIdx(n, s));
+    if (r.sIp.isNotEmpty) n.arp[r.sIp] = mac(s, 0);
+  }
+
+  /// MODE REALTIME: paket diproses seketika tanpa animasi: catat event, pelajari ARP, tampilkan hasil.
+  void instant(PR r, {bool toastIt = true}) {
+    final s = dev(r.sId)?.name ?? '?', d = dev(r.dId)?.name ?? '?';
+    if (!r.ok) {
+      logEv(s, d, r.proto, 'Failed', r.msg);
+      if (toastIt) toast(false, r.msg);
+      return;
+    }
+    if (r.proto == 'ICMP' && r.path.length > 1 && !arped.contains('${r.sId}>${r.dId}')) {
+      var k = 1;
+      while (k < r.path.length - 1 && passive(byId(r.path[k]).t)) k++;
+      logEv(s, byId(r.path[k]).name, 'ARP', 'Success');
+    }
+    logEv(s, d, r.proto, 'Success');
+    learnArp(r);
+    if (r.proto == 'ICMP') arped.add('${r.sId}>${r.dId}');
+    if (toastIt) toast(true, r.msg);
+  }
+
+  /// Kirim paket: Realtime = instan; Simulasi = paket muncul di canvas dalam keadaan PAUSE (jalankan dengan Play / Step).
   void runPing(PR r) {
-    if (!r.ok || r.path.length < 2) { toast(r.ok, r.msg); return; }
+    if (!r.ok || r.path.length < 2 || !simMode) { instant(r); setState(() {}); return; }
     if (r.proto == 'ICMP') r.phases = arped.contains('${r.sId}>${r.dId}') ? ['ICMP'] : ['ARP', 'ICMP'];
     var k = 1;
     while (k < r.path.length - 1 && passive(byId(r.path[k]).t)) k++;
     r.arpLen = k + 1; // ARP hanya sampai node Layer 3 pertama (host tujuan / gateway)
-    setState(() => run = r);
+    final s = dev(r.sId)?.name ?? '?', d = dev(r.dId)?.name ?? '?';
+    r.evs = [for (final ph in r.phases) logEv(s, ph == 'ARP' ? byId(r.path[r.arpLen - 1]).name : d, ph, 'Berjalan')];
     an.duration = Duration(milliseconds: 700 * (r.path.length - 1) * r.phases.length);
-    an.forward(from: 0);
+    setState(() => run = r);
+    an.value = 0; // mulai dari awal dan menunggu Play / Step
+    setState(() {});
+  }
+
+  /// Ganti mode Realtime / Simulasi. Pindah ke Realtime = paket yang tertunda diselesaikan seketika.
+  void setMode(bool sim) {
+    setState(() => simMode = sim);
+    if (!sim && run != null) an.value = 1.0;
+  }
+
+  /// STEP: majukan paket tepat satu hop (berhenti di perangkat berikutnya).
+  void step() {
+    final r = run;
+    if (r == null) return;
+    an.stop();
+    final np = r.phases.length;
+    final double g = an.value.clamp(0.0, 0.9999).toDouble() * np;
+    final ph = g.floor(), lt = g - ph;
+    final n = (r.phases[ph] == 'ARP' ? r.arpLen : r.path.length) - 1;
+    final k = (lt * n + 0.0001).floor() + 1;
+    final double target = k >= n ? (ph + 1) / np : (ph + k / n) / np;
+    an.value = target >= 1 ? 1.0 : target;
+    setState(() {});
   }
 
   /// Pause / lanjutkan animasi paket.
@@ -1080,7 +1415,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
         links..clear()..addAll((j['links'] as List).map((e) => Link(e[0], e[1], e[2])..pa = (e.length > 3 ? e[3] : 0)..pb = (e.length > 4 ? e[4] : 0)));
         notes..clear()..addAll(((j['notes'] ?? []) as List).map((e) => Note(Offset(e[0], e[1]), e[2])));
         nid = devs.fold(0, (m, d) => d.id > m ? d.id : m) + 1;
-        first = null; run = null; arped.clear(); an.stop(); propagate(); autoDhcp(); if (focus) focusAll();
+        first = null; run = null; arped.clear(); an.stop(); for (final e in events) { if (e.status == 'Berjalan') e.status = 'Dibatalkan'; } propagate(); autoDhcp(); if (focus) focusAll();
       });
 
   /// Simpan topologi ke memori HP.
@@ -1388,6 +1723,54 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
               IconButton(tooltip: 'Ukuran toolbar', icon: const Icon(Icons.tune), onPressed: toolbarSettings),
             ])));
 
+  /// Panel Event List di bawah canvas: toggle Realtime/Simulasi, kontrol paket (Play/Pause/Step/Inspeksi), dan riwayat paket.
+  Widget eventPanel() {
+    final land = MediaQuery.of(context).orientation == Orientation.landscape;
+    final h = math.min(land ? 92.0 : 150.0, MediaQuery.of(context).size.height * 0.24);
+    Color sc(String st) => st == 'Success' ? Colors.green : (st == 'Failed' ? Colors.red : (st == 'Berjalan' ? Colors.orange : Colors.grey));
+    Widget ib(IconData i, String tip, VoidCallback? f) => IconButton(tooltip: tip, icon: Icon(i, size: 20), visualDensity: VisualDensity.compact, onPressed: f);
+    return Material(
+        color: kCard,
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          SizedBox(height: 40, child: ListView(scrollDirection: Axis.horizontal, children: [
+            ib(evOpen ? Icons.expand_more : Icons.expand_less, evOpen ? 'Tutup Event List' : 'Buka Event List', () => setState(() => evOpen = !evOpen)),
+            Center(child: ChoiceChip(label: const Text('Realtime'), selected: !simMode, visualDensity: VisualDensity.compact, selectedColor: kAcc.withAlpha(90), onSelected: (_) => setMode(false))),
+            const SizedBox(width: 6),
+            Center(child: ChoiceChip(label: const Text('Simulasi'), selected: simMode, visualDensity: VisualDensity.compact, selectedColor: kAcc.withAlpha(90), onSelected: (_) => setMode(true))),
+            if (simMode && run != null) ...[
+              ib(an.isAnimating ? Icons.pause : Icons.play_arrow, an.isAnimating ? 'Pause' : 'Play', togglePause),
+              ib(Icons.skip_next, 'Step (1 hop)', step),
+              ib(Icons.search, 'Inspeksi Paket', inspect),
+              Center(child: AnimatedBuilder(animation: an, builder: (_, __) => Text(
+                  '${run == null ? '' : run!.phases[math.min((an.value * run!.phases.length).floor(), run!.phases.length - 1)]}${an.isAnimating ? '' : ' (paused)'}',
+                  style: TextStyle(color: kAcc, fontWeight: FontWeight.bold, fontSize: 12)))),
+            ] else if (simMode)
+              Center(child: Padding(padding: const EdgeInsets.symmetric(horizontal: 8), child: Text('Kirim ping lalu tekan Play / Step', style: TextStyle(color: kFg2, fontSize: 11)))),
+            const SizedBox(width: 8),
+            Center(child: Text('Event List (${events.length})', style: TextStyle(fontSize: 11, color: kFg2))),
+            ib(Icons.delete_sweep, 'Hapus riwayat', () => setState(events.clear)),
+          ])),
+          if (evOpen)
+            SizedBox(height: h, child: events.isEmpty
+                ? Center(child: Text('Belum ada paket. Coba ping dari PC.', style: TextStyle(color: kFg2, fontSize: 12)))
+                : ListView.builder(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    itemCount: events.length,
+                    itemBuilder: (_, i) {
+                      final e = events[events.length - 1 - i];
+                      const st = TextStyle(fontSize: 10.5);
+                      return Padding(padding: const EdgeInsets.symmetric(vertical: 1.5), child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        SizedBox(width: 24, child: Text('${e.n}', style: st)),
+                        SizedBox(width: 52, child: Text(e.time, style: st)),
+                        Expanded(flex: 3, child: Text(e.src, style: st, overflow: TextOverflow.ellipsis)),
+                        Expanded(flex: 3, child: Text(e.dst, style: st, overflow: TextOverflow.ellipsis)),
+                        SizedBox(width: 38, child: Text(e.proto, style: st.copyWith(color: kAcc))),
+                        SizedBox(width: 62, child: Text(e.status, style: st.copyWith(color: sc(e.status), fontWeight: FontWeight.bold))),
+                      ]));
+                    })),
+        ]));
+  }
+
   /// Area canvas: InteractiveViewer + toolbar mengambang + panel pause paket + hint. Dipakai portrait maupun landscape.
   Widget canvasArea(BoxConstraints box, Map<Tool, IconData> tools) {
     const tbW = 480.0; // perkiraan lebar toolbar pada skala 100%
@@ -1414,15 +1797,6 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
         )),
       ),
       Positioned(left: pos.dx, top: pos.dy, child: Transform.scale(scale: sc, alignment: Alignment.topLeft, child: toolbar(tools))),
-      if (run != null)
-        Positioned(bottom: 98, left: 0, right: 0, child: Center(child: AnimatedBuilder(animation: an, builder: (_, __) => Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-            decoration: BoxDecoration(color: kCard.withAlpha(240), borderRadius: BorderRadius.circular(14)),
-            child: Row(mainAxisSize: MainAxisSize.min, children: [
-              IconButton(tooltip: an.isAnimating ? 'Pause' : 'Lanjut', icon: Icon(an.isAnimating ? Icons.pause : Icons.play_arrow), onPressed: togglePause),
-              Text(run!.phases[math.min((an.value * run!.phases.length).floor(), run!.phases.length - 1)], style: TextStyle(color: kAcc, fontWeight: FontWeight.bold)),
-              TextButton.icon(onPressed: inspect, icon: const Icon(Icons.search, size: 18), label: const Text('Inspeksi Paket')),
-            ]))))),
       if (tool == Tool.delete)
         Positioned(bottom: 44, left: 0, right: 0, child: Center(child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -1458,7 +1832,7 @@ class SimState extends State<Sim> with SingleTickerProviderStateMixin {
       nav(Icons.dashboard_customize, 'Template', templates),
       nav(Icons.emoji_events, 'Challenge', challenges, on: chal != null),
     ];
-    final canvas = Expanded(child: LayoutBuilder(builder: (_, box) => canvasArea(box, tools)));
+    final canvas = Expanded(child: Column(children: [Expanded(child: LayoutBuilder(builder: (_, box) => canvasArea(box, tools))), eventPanel()]));
     final rail = land
         ? Container(width: 68, color: kCard, child: ListView(children: navItems))
         : Container(height: 62, color: kCard, child: ListView(scrollDirection: Axis.horizontal, children: navItems));
@@ -1576,6 +1950,7 @@ class _DevDlgState extends State<DevDialog> {
       pool = TextEditingController(text: d.pool), psz = TextEditingController(text: '${d.poolSize}'), dgw = TextEditingController(text: d.dgw);
   final sc = ScrollController(), fn = FocusNode();
   String msg = '', before = '';
+  int app = 0; // Desktop: 0 = launcher, 1 = IP Configuration, 2 = Command Prompt
 
   @override
   void dispose() {
@@ -1587,7 +1962,11 @@ class _DevDlgState extends State<DevDialog> {
   void initState() {
     super.initState();
     before = widget.s.snap();
-    if (d.log.isEmpty) d.log.add(d.t == T.router ? 'Reyz Router CLI\nKetik: enable, conf t, interface g0/0, ip address <ip> <mask>, no shutdown, ip route <net> <mask> <next-hop>, do show ip route\n' : 'Reyz Command Prompt\nKetik: ping <ip>, ipconfig, ipconfig /renew, cls\n');
+    if (d.log.isEmpty) {
+      d.log.add(d.t == T.router || d.t == T.sw
+          ? 'Reyz IOS CLI (${d.t == T.sw ? 'Switch' : 'Router'})\nKetik ? untuk bantuan, Tab untuk melengkapi. Mulai: enable, lalu configure terminal\n'
+          : 'Reyz Command Prompt\nPerintah: ping <ip>, ipconfig /all, traceroute <ip>, arp -a, cls\n');
+    }
   }
 
   /// Simpan isian Config langsung saat diketik.
@@ -1700,11 +2079,12 @@ class _DevDlgState extends State<DevDialog> {
               dense: true, contentPadding: EdgeInsets.zero,
               leading: Icon(Icons.circle, size: 12, color: !pt.up ? Colors.red : (peer == null ? Colors.grey : Colors.green)),
               title: Text('Fa0/${i + 1}   ${peer ?? '(kosong)'}'),
-              subtitle: Text('VLAN ${pt.vlan}  -  ${pt.up ? 'Up' : 'Down'}'),
+              subtitle: Text('${pt.trunk ? 'Trunk (semua VLAN)' : 'Access VLAN ${pt.vlan}'}  -  ${pt.up ? 'Up' : 'Down'}'),
               onTap: () async {
-                final v = await widget.s.ask('VLAN Fa0/${i + 1} (1-4094)', '${pt.vlan}');
+                final v = await widget.s.ask('Fa0/${i + 1}: VLAN (1-4094) atau ketik trunk', pt.trunk ? 'trunk' : '${pt.vlan}');
                 final nv = int.tryParse(v ?? '');
-                if (nv != null && nv >= 1 && nv <= 4094) { setState(() => pt.vlan = nv); widget.refresh(); }
+                if ((v ?? '').toLowerCase() == 'trunk') { setState(() => pt.trunk = true); widget.refresh(); }
+                else if (nv != null && nv >= 1 && nv <= 4094) { setState(() { pt.trunk = false; pt.vlan = nv; pt.vlan = nv; widget.s.vlanCreate(d, nv); }); widget.refresh(); }
               },
               trailing: Switch(value: pt.up, onChanged: (v) { setState(() => pt.up = v); widget.refresh(); }));
         }),
@@ -1722,9 +2102,11 @@ class _DevDlgState extends State<DevDialog> {
         ],
       ];
 
+  bool get desk => d.t == T.pc || d.t == T.laptop; // PC & Laptop punya jendela Desktop
+
   Widget config() => ListView(padding: const EdgeInsets.all(12), children: [
         field(n, 'Nama Device', num: false),
-        if (!netDev(d.t) && d.t != T.router) ...ipForm(),
+        if (!netDev(d.t) && d.t != T.router && !desk) ...ipForm(),
         if (d.t == T.router) ...routerForm(),
         if (d.t == T.ap || d.t == T.router) ...wifiBlock(),
         if (d.t == T.sw) ...switchPorts(),
@@ -1738,33 +2120,92 @@ class _DevDlgState extends State<DevDialog> {
         Text('Subnet mask pool mengikuti mask server (${d.mask}). Server harus punya IP, dan client harus satu jaringan (tersambung lewat switch/hub/AP).'),
       ]);
 
-  /// Terminal + kolom input ala chat di bagian bawah (naik di atas keyboard).
-  Widget term() => Column(children: [
-        Expanded(child: Container(
-            color: Colors.black, width: double.infinity, padding: const EdgeInsets.all(8),
-            child: SingleChildScrollView(controller: sc, child: Text(d.log.join('\n'), style: const TextStyle(color: Colors.greenAccent, fontFamily: 'monospace', fontSize: 12))))),
-        Container(
-            color: kCard, padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
-            child: Row(children: [
-              Text(widget.s.prompt(d), style: TextStyle(color: kAcc, fontFamily: 'monospace', fontSize: 12)),
-              const SizedBox(width: 6),
-              Expanded(child: TextField(
-                  controller: cmd, focusNode: fn, autocorrect: false, enableSuggestions: false, textInputAction: TextInputAction.send, onSubmitted: (_) => send(),
-                  decoration: InputDecoration(
-                      isDense: true, hintText: 'Ketik perintah...', filled: true,
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide.none),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10)))),
-              IconButton(icon: const Icon(Icons.send), color: kAcc, onPressed: send),
-            ])),
-      ]);
+  /// Tombol Tab: lengkapi perintah IOS.
+  void tabComplete() {
+    final r = widget.s.complete(d, cmd.text);
+    cmd.value = TextEditingValue(text: r, selection: TextSelection.collapsed(offset: r.length));
+    fn.requestFocus();
+  }
+
+  /// Tampilkan bantuan sintaks untuk teks `t` (seperti menekan ? di IOS) tanpa menjalankan perintah.
+  void showHelp(String t) {
+    setState(() { d.log..add('${widget.s.prompt(d)}$t?')..add(widget.s.qhelp(d, t)); });
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (sc.hasClients) sc.jumpTo(sc.position.maxScrollExtent); });
+    fn.requestFocus();
+  }
+
+  /// Mengetik '?' langsung menampilkan bantuan; karakter '?' tidak dimasukkan ke teks.
+  void onType(String v) {
+    if (!v.endsWith('?')) return;
+    final t = v.substring(0, v.length - 1);
+    cmd.value = TextEditingValue(text: t, selection: TextSelection.collapsed(offset: t.length));
+    showHelp(t);
+  }
+
+  /// Terminal + kolom input ala chat di bagian bawah (naik di atas keyboard), dengan tombol Tab dan ?.
+  Widget term() {
+    Widget ib(IconData i, String tip, VoidCallback f) => IconButton(tooltip: tip, icon: Icon(i), color: kAcc, onPressed: f, padding: EdgeInsets.zero, constraints: const BoxConstraints(minWidth: 38, minHeight: 38));
+    return Column(children: [
+      Expanded(child: Container(
+          color: Colors.black, width: double.infinity, padding: const EdgeInsets.all(8),
+          child: SingleChildScrollView(controller: sc, child: Text(d.log.join('\n'), style: const TextStyle(color: Colors.greenAccent, fontFamily: 'monospace', fontSize: 12))))),
+      Container(
+          color: kCard, padding: const EdgeInsets.fromLTRB(8, 6, 2, 6),
+          child: Row(children: [
+            Expanded(child: Focus(
+                onKeyEvent: (_, e) {
+                  if (e is KeyDownEvent && e.logicalKey == LogicalKeyboardKey.tab) { tabComplete(); return KeyEventResult.handled; }
+                  return KeyEventResult.ignored;
+                },
+                child: TextField(
+                    controller: cmd, focusNode: fn, autocorrect: false, enableSuggestions: false, textInputAction: TextInputAction.send,
+                    onSubmitted: (_) => send(), onChanged: onType,
+                    style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+                    decoration: InputDecoration(
+                        isDense: true, hintText: 'Ketik perintah...', filled: true,
+                        prefixText: widget.s.prompt(d), prefixStyle: TextStyle(color: kAcc, fontFamily: 'monospace', fontSize: 13),
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide.none),
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10))))),
+            if (d.t == T.router || d.t == T.sw) ib(Icons.keyboard_tab, 'Tab (autocomplete)', tabComplete),
+            ib(Icons.help_outline, 'Bantuan (?)', () => showHelp(cmd.text)),
+            ib(Icons.send, 'Kirim', send),
+          ])),
+    ]);
+  }
+
+  /// Ikon aplikasi di jendela Desktop.
+  Widget deskIcon(IconData i, String t, VoidCallback f) => InkWell(
+      onTap: f,
+      child: SizedBox(width: 110, child: Column(children: [
+        Container(width: 64, height: 64, decoration: BoxDecoration(color: kCard, borderRadius: BorderRadius.circular(16), border: Border.all(color: kAcc)), child: Icon(i, color: kAcc, size: 34)),
+        const SizedBox(height: 6),
+        Text(t, textAlign: TextAlign.center, style: const TextStyle(fontSize: 12)),
+      ])));
+
+  /// JENDELA DESKTOP (PC / Laptop): launcher aplikasi -> IP Configuration (form GUI) dan Command Prompt.
+  Widget desktop() {
+    if (app == 0) {
+      return Padding(padding: const EdgeInsets.all(16), child: Wrap(spacing: 20, runSpacing: 16, children: [
+        deskIcon(Icons.settings_ethernet, 'IP Configuration', () => setState(() => app = 1)),
+        deskIcon(Icons.terminal, 'Command Prompt', () => setState(() => app = 2)),
+      ]));
+    }
+    return Column(children: [
+      Material(color: kCard, child: Row(children: [
+        IconButton(icon: const Icon(Icons.arrow_back), tooltip: 'Kembali ke Desktop', onPressed: () => setState(() => app = 0)),
+        Text(app == 1 ? 'IP Configuration' : 'Command Prompt', style: const TextStyle(fontWeight: FontWeight.bold)),
+      ])),
+      Expanded(child: app == 1 ? ListView(padding: const EdgeInsets.all(12), children: ipForm()) : term()),
+    ]);
+  }
 
   @override
   Widget build(BuildContext context) {
-    final cli = !passive(d.t), dh = d.t == T.server;
-    final tabs = ['Config', if (dh) 'DHCP', if (cli) d.t == T.router ? 'CLI' : 'Command Prompt'];
+    final cli = !desk && (!passive(d.t) || d.t == T.sw), dh = d.t == T.server;
+    final tabs = [if (desk) 'Desktop', 'Config', if (dh) 'DHCP', if (cli) (d.t == T.router || d.t == T.sw ? 'CLI' : 'Command Prompt')];
     return DefaultTabController(length: tabs.length, child: Scaffold(
       appBar: AppBar(toolbarHeight: 40, backgroundColor: kBg, title: Text(d.name, style: const TextStyle(fontSize: 16)), bottom: TabBar(tabs: [for (final t in tabs) Tab(text: t, height: 34)])),
-      body: TabBarView(children: [config(), if (dh) dhcpTab(), if (cli) term()]),
+      body: TabBarView(children: [if (desk) desktop(), config(), if (dh) dhcpTab(), if (cli) term()]),
     ));
   }
 }
@@ -1820,7 +2261,14 @@ class GuidePage extends StatelessWidget {
           'PC1 192.168.1.2 gateway 192.168.1.1, PC2 192.168.2.2 gateway 192.168.2.1. Lalu di router:\n'
           'enable\nconf t\ninterface g0/0\nip address 192.168.1.1 255.255.255.0\nno shutdown\nexit\n'
           'interface g0/1\nip address 192.168.2.1 255.255.255.0\nno shutdown\nend\ndo show ip route\n\n'
-          'FITUR BARU v1.4\n\n'
+          'CLI CISCO IOS (Router & Switch)\n\n'
+          'Buka Router/Switch > tab CLI. Mode: Router> (enable) Router# (configure terminal) Router(config)# (interface g0/0) Router(config-if)#. Perintah bisa disingkat (conf t, sh ip int br). Ketik ? untuk bantuan sintaks, tombol Tab untuk melengkapi. '
+          'Switch: vlan 10, name SALES, interface fa0/1, switchport mode access, switchport access vlan 10, switchport mode trunk. Show: show vlan brief, show interfaces trunk, show running-config.\n\n'
+          'DESKTOP PC / LAPTOP\n\n'
+          'Tab Desktop berisi IP Configuration (form + DHCP/Static) dan Command Prompt: ping, ipconfig /all, traceroute, arp -a.\n\n'
+          'REALTIME vs SIMULASI\n\n'
+          'Di panel Event List (bawah canvas): Realtime = paket diproses instan. Simulasi = paket muncul diam di canvas; jalankan dengan Play atau Step (1 hop), bisa di-Pause dan diinspeksi. Tabel di bawahnya mencatat Source, Destination, Protokol (ICMP/ARP/DHCP), dan Status.\n\n'
+          'FITUR v1.4\n\n'
           'Rotasi layar: aplikasi mengikuti posisi HP (portrait/landscape), isi canvas tetap. Toolbar atas bisa digeser dan dicubit untuk mengubah ukuran (ikon tune untuk slider). '
           'Switch: Config menampilkan 24 port (Fa0/1-0/24) dengan Up/Down dan VLAN manual; dua perangkat hanya bisa saling ping kalau port-nya Up dan VLAN-nya sama. '
           'Access Point / Router Wi-Fi memancarkan heatmap sinyal; HP/Laptop yang disambung Kabel Wireless putus kalau digeser keluar lingkaran. '
